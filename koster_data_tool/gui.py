@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
 from .export_pipeline import run_full_export
 from .scanner import ScanResult, scan_root
+from .state_store import read_last_root, write_last_root
 
 WINDOW_TITLE = "科斯特工作站电化学数据处理"
 
@@ -32,6 +33,11 @@ class App:
         self.stage_var = tk.StringVar(value="待机")
         self.current_var = tk.StringVar(value="-")
         self.percent_var = tk.StringVar(value="0.0")
+        self.battery_count_var = tk.StringVar(value="0")
+        self.recognized_file_count_var = tk.StringVar(value="0")
+        self.skipped_dir_count_var = tk.StringVar(value="0")
+        self.skipped_file_count_var = tk.StringVar(value="0")
+        self.progress_value_var = tk.DoubleVar(value=0.0)
         self.root_path_var = tk.StringVar(value="未选择")
 
         self.output_type_var = tk.StringVar(value="Csp")
@@ -69,6 +75,15 @@ class App:
         ttk.Label(bottom, textvariable=self.current_var).pack(side="left", padx=(4, 12))
         ttk.Label(bottom, text="百分比:").pack(side="left")
         ttk.Label(bottom, textvariable=self.percent_var).pack(side="left", padx=(4, 0))
+        ttk.Label(bottom, text=" 电池数:").pack(side="left", padx=(12, 0))
+        ttk.Label(bottom, textvariable=self.battery_count_var).pack(side="left")
+        ttk.Label(bottom, text=" 识别文件数:").pack(side="left", padx=(12, 0))
+        ttk.Label(bottom, textvariable=self.recognized_file_count_var).pack(side="left")
+        ttk.Label(bottom, text=" 跳过目录数:").pack(side="left", padx=(12, 0))
+        ttk.Label(bottom, textvariable=self.skipped_dir_count_var).pack(side="left")
+        ttk.Label(bottom, text=" 跳过文件数:").pack(side="left", padx=(12, 0))
+        ttk.Label(bottom, textvariable=self.skipped_file_count_var).pack(side="left")
+        ttk.Progressbar(bottom, orient="horizontal", mode="determinate", maximum=100, variable=self.progress_value_var, length=220).pack(side="left", padx=(12, 0))
 
     def _build_step1(self) -> None:
         actions = ttk.Frame(self.page1)
@@ -76,6 +91,9 @@ class App:
         ttk.Button(actions, text="科斯特数据处理", command=self.choose_root).pack(side="left")
         self.start_scan_btn = ttk.Button(actions, text="开始扫描", command=self.start_scan, state="disabled")
         self.start_scan_btn.pack(side="left", padx=8)
+        self.cancel_scan_btn = ttk.Button(actions, text="取消扫描", command=self.cancel_scan, state="disabled")
+        self.cancel_scan_btn.pack(side="left")
+        ttk.Button(actions, text="打开跳过清单", command=self.open_skipped_list_dir).pack(side="left", padx=8)
 
         path_frame = ttk.LabelFrame(self.page1, text="已选根目录", padding=8)
         path_frame.pack(fill="x", pady=(10, 0))
@@ -92,6 +110,7 @@ class App:
         ttk.Checkbutton(options, text="是否输出电池级工作簿", variable=self.export_book_var).grid(row=2, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(options, text="完成后打开输出文件夹", variable=self.open_folder_var).grid(row=3, column=0, columnspan=2, sticky="w")
         ttk.Button(options, text="打开运行报告", command=self.open_run_report_dir).grid(row=0, column=3, padx=(20, 0), sticky="e")
+        ttk.Button(options, text="打开跳过清单", command=self.open_skipped_list_dir).grid(row=1, column=3, padx=(20, 0), sticky="e")
 
         self.sub_notebook = ttk.Notebook(self.page2)
         self.param_page = ttk.Frame(self.sub_notebook, padding=8)
@@ -139,6 +158,10 @@ class App:
         pass
 
     def _load_default_open_dir(self) -> None:
+        last_root = read_last_root(self.ctx.paths.state_dir)
+        if last_root is not None:
+            self.default_open_dir = last_root.parent
+            return
         self.default_open_dir = self.ctx.paths.program_dir
 
     def choose_root(self) -> None:
@@ -148,17 +171,43 @@ class App:
         self.selected_root = Path(chosen).resolve()
         self.root_path_var.set(str(self.selected_root))
         self.start_scan_btn.configure(state="normal")
+        write_last_root(self.ctx.paths.state_dir, self.selected_root)
+        self.default_open_dir = self.selected_root.parent
 
     def start_scan(self) -> None:
         if not self.selected_root:
             return
+        self._reset_scan_result_state()
         self.cancel_event.clear()
+        self.start_scan_btn.configure(state="disabled")
+        self.cancel_scan_btn.configure(state="normal")
         self.scan_thread = threading.Thread(target=self._scan_worker, daemon=True)
         self.scan_thread.start()
 
+    def cancel_scan(self) -> None:
+        self.cancel_event.set()
+        self.cancel_scan_btn.configure(state="disabled")
+
     def _scan_worker(self) -> None:
-        result = scan_root(str(self.selected_root), str(self.ctx.paths.program_dir), self.ctx.run_id, self.cancel_event, None)
+        def progress_cb(stage: str, current: str, percent: float, bcnt: int, rcnt: int, sdcnt: int, sfcnt: int) -> None:
+            self.msg_q.put(("scan_progress", (stage, current, percent, bcnt, rcnt, sdcnt, sfcnt)))
+
+        result = scan_root(str(self.selected_root), str(self.ctx.paths.program_dir), self.ctx.run_id, self.cancel_event, progress_cb)
         self.msg_q.put(("done", result))
+
+    def _reset_scan_result_state(self) -> None:
+        self.scan_result = None
+        self.param_tree.delete(*self.param_tree.get_children())
+        for lb in (self.bat_list, self.cv_list, self.gcd_list, self.eis_list):
+            lb.delete(0, "end")
+        self.stage_var.set("待机")
+        self.current_var.set("-")
+        self.percent_var.set("0.0%")
+        self.battery_count_var.set("0")
+        self.recognized_file_count_var.set("0")
+        self.skipped_dir_count_var.set("0")
+        self.skipped_file_count_var.set("0")
+        self.progress_value_var.set(0.0)
 
     def _poll_queue(self) -> None:
         try:
@@ -168,11 +217,24 @@ class App:
                     self.scan_result = payload
                     self._fill_step2(payload)
                     self.notebook.select(self.page2)
+                    self.start_scan_btn.configure(state="normal")
+                    self.cancel_scan_btn.configure(state="disabled")
+                elif kind == "scan_progress":
+                    stage, current, percent, bcnt, rcnt, sdcnt, sfcnt = payload
+                    self.stage_var.set(stage)
+                    self.current_var.set(current)
+                    self.percent_var.set(f"{percent:.1f}%")
+                    self.battery_count_var.set(str(bcnt))
+                    self.recognized_file_count_var.set(str(rcnt))
+                    self.skipped_dir_count_var.set(str(sdcnt))
+                    self.skipped_file_count_var.set(str(sfcnt))
+                    self.progress_value_var.set(percent)
                 elif kind == "progress":
                     stage, current, percent = payload
                     self.stage_var.set(stage)
                     self.current_var.set(current)
                     self.percent_var.set(f"{percent:.1f}%")
+                    self.progress_value_var.set(percent)
                 elif kind == "export_done":
                     self._on_export_done(payload)
         except queue.Empty:
@@ -347,6 +409,10 @@ class App:
 
     def open_run_report_dir(self) -> None:
         self._open_directory(self.ctx.report_path.parent, self.ctx.report_path)
+
+    def open_skipped_list_dir(self) -> None:
+        skipped_file = self.ctx.paths.reports_dir / f"skipped_paths-{self.ctx.run_id}.txt"
+        self._open_directory(skipped_file.parent, skipped_file)
 
 
 def run_gui() -> int:
