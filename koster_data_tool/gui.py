@@ -57,6 +57,9 @@ class App:
         self.undo_snapshot: dict[tuple[str, int], str] | None = None
         self.tooltip: tk.Toplevel | None = None
         self.tooltip_var = tk.StringVar(value="")
+        self.cell_overlay: tk.Canvas | None = None
+        self.param_y_scroll: ttk.Scrollbar | None = None
+        self.param_x_scroll: ttk.Scrollbar | None = None
         self.filter_tab_visible = True
         self._final_stage_seen = False
         self._pending_export_result: dict | None = None
@@ -165,23 +168,29 @@ class App:
             self.param_tree.heading(c, text=t)
             self.param_tree.column(c, width=100, anchor="center")
         self.param_tree.tag_configure("row_error", background="#ffeaea")
-        py = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.param_tree.yview)
-        px = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.param_tree.xview)
-        self.param_tree.configure(yscrollcommand=py.set, xscrollcommand=px.set)
+        self.param_y_scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self._param_tree_yview)
+        self.param_x_scroll = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self._param_tree_xview)
+        self.param_tree.configure(yscrollcommand=self._on_tree_yscroll, xscrollcommand=self._on_tree_xscroll)
         self.param_tree.grid(row=0, column=0, sticky="nsew")
-        py.grid(row=0, column=1, sticky="ns")
-        px.grid(row=1, column=0, sticky="ew")
+        self.param_y_scroll.grid(row=0, column=1, sticky="ns")
+        self.param_x_scroll.grid(row=1, column=0, sticky="ew")
         tree_wrap.columnconfigure(0, weight=1)
         tree_wrap.rowconfigure(0, weight=1)
+
+        self.cell_overlay = tk.Canvas(self.param_tree, highlightthickness=0, bd=0, bg="")
+        self.cell_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+
         self.param_tree.bind("<Double-1>", self._edit_param_cell)
-        self.param_tree.bind("<Button-1>", self._on_tree_click)
-        self.param_tree.bind("<Shift-Button-1>", self._on_tree_shift_click)
-        self.param_tree.bind("<B1-Motion>", self._on_tree_drag)
-        self.param_tree.bind("<Motion>", self._on_tree_hover)
-        self.param_tree.bind("<Leave>", lambda _e: self._hide_tooltip())
+        self.cell_overlay.bind("<Double-1>", self._edit_param_cell)
+        self.cell_overlay.bind("<Button-1>", self._on_tree_click)
+        self.cell_overlay.bind("<Shift-Button-1>", self._on_tree_shift_click)
+        self.cell_overlay.bind("<B1-Motion>", self._on_tree_drag)
+        self.cell_overlay.bind("<Motion>", self._on_tree_hover)
+        self.cell_overlay.bind("<Leave>", lambda _e: self._hide_tooltip())
         self.param_tree.bind("<Control-c>", self._copy_selection)
         self.param_tree.bind("<Control-v>", self._paste_multi_value)
         self.param_tree.bind("<Control-z>", self._undo_last_edit)
+        self.param_tree.bind("<Configure>", lambda _e: self._redraw_cell_overlay())
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
@@ -222,6 +231,24 @@ class App:
             self.param_tree.item(iid, values=vals)
         self._refresh_error_states()
 
+
+    def _param_tree_yview(self, *args) -> None:
+        self.param_tree.yview(*args)
+        self._redraw_cell_overlay()
+
+    def _param_tree_xview(self, *args) -> None:
+        self.param_tree.xview(*args)
+        self._redraw_cell_overlay()
+
+    def _on_tree_yscroll(self, first, last) -> None:
+        if self.param_y_scroll is not None:
+            self.param_y_scroll.set(first, last)
+        self._redraw_cell_overlay()
+
+    def _on_tree_xscroll(self, first, last) -> None:
+        if self.param_x_scroll is not None:
+            self.param_x_scroll.set(first, last)
+        self._redraw_cell_overlay()
 
     def _load_default_open_dir(self) -> None:
         last_root = read_last_root(self.ctx.paths.state_dir)
@@ -368,12 +395,57 @@ class App:
         if self.eis_list.size() > 0:
             self.eis_list.select_set(self.eis_list.size() - 1)
 
-    def _cell_from_event(self, event) -> tuple[str, int] | None:
+    def _get_display_cols(self) -> list[str]:
+        display_cols = self.param_tree.cget("displaycolumns")
+        if display_cols in ("#all", ("#all",), ["#all"]):
+            return list(self.param_columns)
+        return list(display_cols)
+
+    def _event_to_actual_cell(self, event) -> tuple[str, int] | None:
         iid = self.param_tree.identify_row(event.y)
-        col = self.param_tree.identify_column(event.x)
-        if not iid or not col:
+        display_col = self.param_tree.identify_column(event.x)
+        if not iid or not display_col:
             return None
-        return iid, int(col[1:]) - 1
+        display_cols = self._get_display_cols()
+        display_idx = int(display_col[1:]) - 1
+        if display_idx < 0 or display_idx >= len(display_cols):
+            return None
+        col_key = display_cols[display_idx]
+        if col_key not in self.param_columns:
+            return None
+        return iid, self.param_columns.index(col_key)
+
+    def _actual_col_to_display_col_id(self, actual_idx: int) -> str | None:
+        if actual_idx < 0 or actual_idx >= len(self.param_columns):
+            return None
+        col_key = self.param_columns[actual_idx]
+        display_cols = self._get_display_cols()
+        if col_key not in display_cols:
+            return None
+        return f"#{display_cols.index(col_key) + 1}"
+
+    def _redraw_cell_overlay(self) -> None:
+        if self.cell_overlay is None:
+            return
+        self.cell_overlay.delete("all")
+        for iid, actual_col in sorted(self.selected_cells):
+            display_col_id = self._actual_col_to_display_col_id(actual_col)
+            if display_col_id is None:
+                continue
+            bbox = self.param_tree.bbox(iid, display_col_id)
+            if not bbox:
+                continue
+            x, y, w, h = bbox
+            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#0078d7", width=2)
+        for (iid, actual_col), _msg in self.error_cells.items():
+            display_col_id = self._actual_col_to_display_col_id(actual_col)
+            if display_col_id is None:
+                continue
+            bbox = self.param_tree.bbox(iid, display_col_id)
+            if not bbox:
+                continue
+            x, y, w, h = bbox
+            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#d40000", width=2)
 
     def _select_rectangle(self, start: tuple[str, int], end: tuple[str, int]) -> None:
         rows = list(self.param_tree.get_children())
@@ -385,32 +457,40 @@ class App:
         cs, ce = sorted([s_col, e_col])
         self.selected_cells = {(rows[r], c) for r in range(rs, re + 1) for c in range(cs, ce + 1)}
         self.param_tree.selection_set(rows[rs: re + 1])
+        self._redraw_cell_overlay()
 
     def _on_tree_click(self, event):
-        cell = self._cell_from_event(event)
+        self.param_tree.focus_set()
+        cell = self._event_to_actual_cell(event)
         if not cell:
-            return
+            return "break"
         self.drag_start_cell = cell
         self.selected_cells = {cell}
+        self._redraw_cell_overlay()
+        return "break"
 
     def _on_tree_shift_click(self, event):
-        cell = self._cell_from_event(event)
+        self.param_tree.focus_set()
+        cell = self._event_to_actual_cell(event)
         if not cell:
-            return
+            return "break"
         anchor = self.drag_start_cell or cell
         self._select_rectangle(anchor, cell)
         return "break"
 
     def _on_tree_drag(self, event):
+        self.param_tree.focus_set()
         if not self.drag_start_cell:
-            return
-        cell = self._cell_from_event(event)
+            return "break"
+        cell = self._event_to_actual_cell(event)
         if not cell:
-            return
+            return "break"
         self._select_rectangle(self.drag_start_cell, cell)
+        return "break"
 
     def _on_tree_hover(self, event):
-        cell = self._cell_from_event(event)
+        self.param_tree.focus_set()
+        cell = self._event_to_actual_cell(event)
         if not cell or cell not in self.error_cells:
             self._hide_tooltip()
             return
@@ -468,12 +548,12 @@ class App:
         self._apply_cell_updates(updates)
 
     def _paste_multi_value(self, _event=None):
-        text = self.param_fill_var.get().strip()
+        try:
+            text = self.root.clipboard_get().strip()
+        except Exception:
+            return "break"
         if not text:
-            try:
-                text = self.root.clipboard_get()
-            except Exception:
-                text = ""
+            return "break"
         matrix = self._parse_matrix(text)
         if not matrix:
             return "break"
@@ -482,7 +562,8 @@ class App:
             return "break"
         if self.selected_cells:
             start_row_idx = min(rows.index(iid) for iid, _c in self.selected_cells if iid in rows)
-            start_col = min(c for _iid, c in self.selected_cells)
+            editable_selected_cols = sorted(c for _iid, c in self.selected_cells if c in self.editable_columns)
+            start_col = editable_selected_cols[0] if editable_selected_cols else 3
         else:
             start_row_idx, start_col = 0, 3
         updates: dict[tuple[str, int], str] = {}
@@ -535,16 +616,19 @@ class App:
                         self.error_cells[(iid, col_map[k])] = "；".join(msgs)
             else:
                 self.param_tree.item(iid, tags=())
+        self._redraw_cell_overlay()
 
     def _edit_param_cell(self, event):
-        iid = self.param_tree.identify_row(event.y)
-        col = self.param_tree.identify_column(event.x)
-        if not iid or not col:
+        cell = self._event_to_actual_cell(event)
+        if not cell:
             return
-        ci = int(col[1:]) - 1
+        iid, ci = cell
         if ci <= 2:
             return
         if ci == 6 and self.output_type_var.get() == "Qsp":
+            return
+        col = self._actual_col_to_display_col_id(ci)
+        if col is None:
             return
         x, y, w, h = self.param_tree.bbox(iid, col)
         old_vals = list(self.param_tree.item(iid, "values"))
@@ -563,7 +647,9 @@ class App:
         editor.bind("<FocusOut>", save)
 
     def _set_focus_cell(self, iid: str, column_index: int) -> None:
-        col = f"#{column_index + 1}"
+        col = self._actual_col_to_display_col_id(column_index)
+        if col is None:
+            return
         self.param_tree.focus(iid)
         self.param_tree.selection_set(iid)
         self.param_tree.focus_set()
