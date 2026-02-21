@@ -185,18 +185,22 @@ class App:
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
-        self.bat_list = tk.Listbox(sel_frame, selectmode="extended", exportselection=False)
-        self.cv_list = tk.Listbox(sel_frame, selectmode="extended", exportselection=False)
-        self.gcd_list = tk.Listbox(sel_frame, selectmode="extended", exportselection=False)
-        self.eis_list = tk.Listbox(sel_frame, selectmode="extended", exportselection=False)
-        for i, (w, title) in enumerate([(self.bat_list, "电池"), (self.cv_list, "CV"), (self.gcd_list, "GCD"), (self.eis_list, "EIS")]):
+        self.bat_list = None
+        self.cv_list = None
+        self.gcd_list = None
+        self.eis_list = None
+        for i, (attr_name, title) in enumerate(
+            [("bat_list", "电池"), ("cv_list", "CV"), ("gcd_list", "GCD"), ("eis_list", "EIS")]
+        ):
             col = ttk.Frame(sel_frame)
             col.grid(row=0, column=i, sticky="nsew", padx=8)
             ttk.Label(col, text=title).pack(anchor="w")
-            ys = ttk.Scrollbar(col, orient="vertical", command=w.yview)
-            w.configure(yscrollcommand=ys.set)
-            w.pack(side="left", fill="both", expand=True)
+            listbox = tk.Listbox(col, selectmode="extended", exportselection=False)
+            ys = ttk.Scrollbar(col, orient="vertical", command=listbox.yview)
+            listbox.configure(yscrollcommand=ys.set)
+            listbox.pack(side="left", fill="both", expand=True)
             ys.pack(side="right", fill="y")
+            setattr(self, attr_name, listbox)
             sel_frame.columnconfigure(i, weight=1)
 
         btns = ttk.Frame(self.page2)
@@ -766,7 +770,7 @@ class App:
             f"运行报告: {result['run_report_path']}",
             f"日志: {result['log_path']}",
             f"skipped_paths: {skipped_file}",
-            "失败/告警(前50):",
+            "失败/告警(前50，完整见运行报告):",
         ]
         for x in merged[:50]:
             lines.append(f"- {x}")
