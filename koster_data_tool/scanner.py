@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from .text_parse import detect_delimiter_and_rows, estimate_max_cycle, preclean_lines
 
-NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+
 FILE_RE = re.compile(r"^(CV|GCD|EIS)-([+-]?(?:\d+(?:\.\d*)?|\.\d+))\.txt$", re.IGNORECASE)
-CYCLE_MARK_RE = re.compile(r"(\d+)\s*CYCLE\s*$", re.IGNORECASE)
 
 
 @dataclass
@@ -45,87 +45,71 @@ class ScanResult:
     skipped_report_path: str
 
 
-def _is_number_token(token: str) -> bool:
-    return bool(NUMERIC_RE.match(token.strip()))
+def _split_for_delimiter(line: str, delimiter: str) -> list[str]:
+    if delimiter in {"\t", ",", ";"}:
+        parts = line.split(delimiter)
+    else:
+        parts = re.split(delimiter, line)
+    return [p.strip() for p in parts if p.strip()]
 
 
-def _split_tokens(line: str) -> list[str]:
-    if "\t" in line:
-        return [t.strip() for t in line.split("\t") if t.strip()]
-    if "," in line:
-        return [t.strip() for t in line.split(",") if t.strip()]
-    if ";" in line:
-        return [t.strip() for t in line.split(";") if t.strip()]
-    if re.search(r"\s{2,}", line):
-        return [t.strip() for t in re.split(r"\s{2,}", line) if t.strip()]
-    return [t.strip() for t in line.split() if t.strip()]
-
-
-def _strip_cycle_marker_tail(line: str) -> tuple[str, Optional[int]]:
-    s = line.rstrip()
-    m = CYCLE_MARK_RE.search(s)
-    if not m:
-        return s, None
-    return s[: m.start()].rstrip(), int(m.group(1))
-
-
-def _has_valid_data_row(line: str) -> bool:
-    stripped, _ = _strip_cycle_marker_tail(line)
-    if not stripped:
-        return False
-    tokens = _split_tokens(stripped)
-    numeric_count = sum(1 for t in tokens if _is_number_token(t))
-    return numeric_count >= 3
-
-
-def _max_cycle_from_markers(content: str) -> Optional[int]:
-    lines = content.splitlines()
-    markers: list[tuple[int, int]] = []
-    for i, line in enumerate(lines):
-        _, mk = _strip_cycle_marker_tail(line)
-        if mk is not None and mk > 0:
-            markers.append((i, mk))
-
-    if not lines:
-        return None
-    if not markers:
-        return 1
-
-    last_idx, n_max = max(markers, key=lambda x: x[1])
-    has_data_after = any(_has_valid_data_row(line) for line in lines[last_idx + 1 :])
-    return n_max + 1 if has_data_after else n_max
-
-
-def _max_cycle_from_gcd_cycle_column(content: str) -> Optional[int]:
-    lines = [ln for ln in content.splitlines() if ln.strip()]
-    if not lines:
+def _max_cycle_from_parse_core(file_type: str, content: str) -> Optional[int]:
+    clean_lines, marker_events = preclean_lines(content)
+    if not clean_lines and not marker_events:
         return None
 
-    cycle_col: Optional[int] = None
-    max_cycle: Optional[int] = None
+    detection = None
+    try:
+        detection = detect_delimiter_and_rows(clean_lines)
+    except ValueError:
+        if len(clean_lines) > 1:
+            try:
+                detection = detect_delimiter_and_rows(clean_lines[1:])
+            except ValueError:
+                pass
 
-    for line in lines:
-        tokens = _split_tokens(line)
-        if not tokens:
-            continue
-        if cycle_col is None:
-            for idx, token in enumerate(tokens):
-                if token.strip().lower() == "cycle":
-                    cycle_col = idx
-                    break
-            if cycle_col is None:
+    kept_lines = detection["kept_lines"] if detection else []
+    delimiter = detection["delimiter"] if detection else "	"
+
+    cycle_values: list[int] = []
+    has_cycle_col = False
+    cycle_idx: Optional[int] = None
+    if file_type == "GCD" and clean_lines:
+        for line in clean_lines:
+            tokens = _split_for_delimiter(line, delimiter)
+            if not tokens:
                 continue
-            # header line consumed
-            continue
+            if cycle_idx is None:
+                cycle_idx = next((i for i, tk in enumerate(tokens) if tk.lower() == "cycle"), None)
+                if cycle_idx is None:
+                    continue
+                has_cycle_col = True
+                continue
+            if cycle_idx < len(tokens):
+                value = tokens[cycle_idx]
+                if re.match(r"^[+-]?\d+$", value):
+                    cycle_values.append(int(value))
 
-        if cycle_col >= len(tokens):
-            continue
-        tk = tokens[cycle_col]
-        if _is_number_token(tk):
-            v = int(float(tk))
-            max_cycle = v if max_cycle is None else max(max_cycle, v)
+    marker_indices = [event["rawLineIndex"] for event in marker_events]
+    last_marker_index = max(marker_indices) if marker_indices else None
+    has_data_after_last_marker = False
+    if last_marker_index is not None:
+        kept_set = set(kept_lines)
+        for raw_idx, raw_line in enumerate(content.splitlines()):
+            if raw_idx <= last_marker_index:
+                continue
+            normalized = raw_line[1:] if raw_line.startswith("\ufeff") else raw_line
+            if normalized in kept_set:
+                has_data_after_last_marker = True
+                break
 
-    return max_cycle
+    return estimate_max_cycle(
+        file_type=file_type,
+        has_cycle_col=has_cycle_col,
+        cycle_values=cycle_values if has_cycle_col else None,
+        marker_events=marker_events,
+        has_data_after_last_marker=has_data_after_last_marker,
+    )
 
 
 def _detect_file(file_name: str, abs_path: Path) -> Optional[RecognizedFile]:
@@ -218,7 +202,7 @@ def scan_root(
             if cancel_flag and cancel_flag.is_set():
                 break
             txt = _safe_read_text(Path(file_obj.path))
-            mc = _max_cycle_from_markers(txt) if txt is not None else None
+            mc = _max_cycle_from_parse_core("CV", txt) if txt is not None else None
             if mc is not None:
                 cv_cycles.append(mc)
         for file_obj in gcd_files:
@@ -227,9 +211,7 @@ def scan_root(
             txt = _safe_read_text(Path(file_obj.path))
             if txt is None:
                 continue
-            mc = _max_cycle_from_gcd_cycle_column(txt)
-            if mc is None:
-                mc = _max_cycle_from_markers(txt)
+            mc = _max_cycle_from_parse_core("GCD", txt)
             if mc is not None:
                 gcd_cycles.append(mc)
 
@@ -270,7 +252,7 @@ def scan_root(
                 if cancel_flag and cancel_flag.is_set():
                     break
                 txt = _safe_read_text(Path(file_obj.path))
-                mc = _max_cycle_from_markers(txt) if txt is not None else None
+                mc = _max_cycle_from_parse_core("CV", txt) if txt is not None else None
                 if mc is not None:
                     cv_cycles.append(mc)
             for file_obj in gcd_files:
@@ -279,9 +261,7 @@ def scan_root(
                 txt = _safe_read_text(Path(file_obj.path))
                 if txt is None:
                     continue
-                mc = _max_cycle_from_gcd_cycle_column(txt)
-                if mc is None:
-                    mc = _max_cycle_from_markers(txt)
+                mc = _max_cycle_from_parse_core("GCD", txt)
                 if mc is not None:
                     gcd_cycles.append(mc)
 
