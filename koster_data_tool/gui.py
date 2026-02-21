@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
 from .export_pipeline import run_full_export
+from .param_validation import coerce_int_strict, validate_battery_row, validate_global
 from .scanner import ScanResult, scan_root
 from .state_store import read_last_root, write_last_root
 
@@ -44,6 +45,8 @@ class App:
         self.a_geom_var = tk.StringVar(value="1")
         self.export_book_var = tk.BooleanVar(value=True)
         self.open_folder_var = tk.BooleanVar(value=True)
+        self._blink_job = None
+        self._blink_on = False
 
         self._build_ui()
         self._load_default_open_dir()
@@ -154,8 +157,13 @@ class App:
         ttk.Button(btns, text="确定导出", command=self._confirm_export).pack(side="left")
 
     def _on_output_type_change(self):
-        # Qsp 下隐藏 K（在参数收集时固定为1）
-        pass
+        output_type = self.output_type_var.get()
+        for iid in self.param_tree.get_children():
+            vals = list(self.param_tree.item(iid, "values"))
+            if output_type == "Qsp":
+                vals[6] = 1
+            self.param_tree.item(iid, values=vals)
+
 
     def _load_default_open_dir(self) -> None:
         last_root = read_last_root(self.ctx.paths.state_dir)
@@ -247,6 +255,7 @@ class App:
             self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle or 1, b.gcd_max_cycle or 1, 10, 0, 90, 1, 1, 1, 2.5, 4.2))
         self._init_filter_lists(result)
         self._load_cache_or_keep()
+        self._on_output_type_change()
 
     def _init_filter_lists(self, result: ScanResult):
         for lb in (self.bat_list, self.cv_list, self.gcd_list, self.eis_list):
@@ -275,6 +284,8 @@ class App:
         ci = int(col[1:]) - 1
         if ci <= 2:
             return
+        if ci == 6 and self.output_type_var.get() == "Qsp":
+            return
         x, y, w, h = self.param_tree.bbox(iid, col)
         old_vals = list(self.param_tree.item(iid, "values"))
         editor = ttk.Entry(self.param_tree)
@@ -289,6 +300,75 @@ class App:
 
         editor.bind("<Return>", save)
         editor.bind("<FocusOut>", save)
+
+    def _set_focus_cell(self, iid: str, column_index: int) -> None:
+        col = f"#{column_index + 1}"
+        self.param_tree.focus(iid)
+        self.param_tree.selection_set(iid)
+        self.param_tree.focus_set()
+        self.param_tree.see(iid)
+        self.param_tree.update_idletasks()
+        bbox = self.param_tree.bbox(iid, col)
+        if bbox:
+            x, y, w, h = bbox
+            self.param_tree.event_generate("<Button-1>", x=x + max(2, w // 3), y=y + max(2, h // 2))
+
+    def _blink_error_cell(self, iid: str, column_index: int) -> None:
+        if self._blink_job is not None:
+            self.root.after_cancel(self._blink_job)
+            self._blink_job = None
+        self._blink_on = False
+
+        def toggle(count: int = 0):
+            self._set_focus_cell(iid, column_index)
+            self._blink_on = not self._blink_on
+            if self._blink_on:
+                self.param_tree.tag_configure("error_focus", background="#ffe1e1")
+                self.param_tree.item(iid, tags=("error_focus",))
+            else:
+                self.param_tree.item(iid, tags=())
+            if count < 3:
+                self._blink_job = self.root.after(180, lambda: toggle(count + 1))
+            else:
+                self.param_tree.item(iid, tags=("error_focus",))
+                self._blink_job = None
+
+        toggle()
+
+    def _validate_all_rows(self):
+        first_iid = next(iter(self.param_tree.get_children()), None)
+        try:
+            a_geom = float(self.a_geom_var.get())
+        except Exception:
+            return {"global": ["A_geom 必须 > 0"]}, ((first_iid, 3) if first_iid else None)
+        output_type = self.output_type_var.get()
+        global_errors = validate_global(output_type=output_type, a_geom=a_geom)
+        if global_errors:
+            return {"global": global_errors}, ((first_iid, 3) if first_iid else None)
+
+        for iid in self.param_tree.get_children():
+            vals = list(self.param_tree.item(iid, "values"))
+            cv_max = coerce_int_strict(str(vals[1]))
+            gcd_max = coerce_int_strict(str(vals[2]))
+            row_errors = validate_battery_row(
+                output_type=output_type,
+                m_pos=vals[3],
+                m_neg=vals[4],
+                p_active=vals[5],
+                k=vals[6],
+                n_cv=vals[7],
+                n_gcd=vals[8],
+                v_start=vals[9],
+                v_end=vals[10],
+                cv_max=cv_max,
+                gcd_max=gcd_max,
+            )
+            if row_errors:
+                order = ["m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
+                col_idx = {"m_pos": 3, "m_neg": 4, "p_active": 5, "k": 6, "n_cv": 7, "n_gcd": 8, "v_start": 9, "v_end": 10}
+                first_field = next((f for f in order if f in row_errors), next(iter(row_errors)))
+                return row_errors, (iid, col_idx[first_field])
+        return {}, None
 
     def _collect_params(self):
         out = {"a_geom": float(self.a_geom_var.get()), "output_type": self.output_type_var.get(), "export_battery_workbook": bool(self.export_book_var.get()), "battery_params": {}}
@@ -357,6 +437,14 @@ class App:
 
     def _confirm_export(self):
         if not self.scan_result or not self.selected_root:
+            return
+        errors, first_cell = self._validate_all_rows()
+        if errors:
+            if first_cell is not None:
+                iid, col_idx = first_cell
+                self.param_tree.see(iid)
+                self._blink_error_cell(iid, col_idx)
+            messagebox.showerror(WINDOW_TITLE, "参数存在错误，已定位到第一个错误单元格")
             return
         try:
             params = self._collect_params()

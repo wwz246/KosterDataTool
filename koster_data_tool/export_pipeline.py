@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .colmap import _append_run_report
 from .output_naming import make_output_paths
+from .param_validation import validate_battery_row, validate_global
 from .workbook_builders import build_battery_workbook, build_electrode_workbook
 
 
@@ -16,14 +17,37 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
             progress_cb(stage, current, percent)
 
     emit("参数校验", 5.0, root_path)
+    output_type = params.get("output_type", "Csp")
     try:
-        if params.get("output_type") == "Csp":
-            for b in scan_result.batteries:
-                if not params["battery_params"][b.name].get("k"):
-                    raise ValueError(f"{b.name}: Csp 模式 K 必填")
-    except Exception as e:
-        _append_run_report(str(ctx.report_path), f"FATAL 参数校验失败: {e}")
-        raise
+        a_geom = float(params.get("a_geom", 0))
+    except Exception:
+        a_geom = 0
+    global_errors = validate_global(output_type=output_type, a_geom=a_geom)
+    row_errors: list[str] = []
+    for b in scan_result.batteries:
+        bp = params.get("battery_params", {}).get(b.name, {})
+        errs = validate_battery_row(
+            output_type=output_type,
+            m_pos=bp.get("m_pos"),
+            m_neg=bp.get("m_neg"),
+            p_active=bp.get("p_active"),
+            k=bp.get("k"),
+            n_cv=bp.get("n_cv"),
+            n_gcd=bp.get("n_gcd"),
+            v_start=bp.get("v_start"),
+            v_end=bp.get("v_end"),
+            cv_max=b.cv_max_cycle,
+            gcd_max=b.gcd_max_cycle,
+        )
+        for field, reason in errs.items():
+            row_errors.append(f"{b.name}.{field}: {reason}")
+
+    if global_errors or row_errors:
+        all_errors = [*global_errors, *row_errors]
+        for item in all_errors:
+            _append_run_report(str(ctx.report_path), f"FATAL 参数校验失败: {item}")
+        logger.error("参数校验失败，禁止导出", errors=all_errors, stage="validation")
+        raise ValueError("参数校验失败，详见 run_report.txt 与 jsonl")
 
     emit("逐文件解析/分圈/选圈", 20.0, "all")
     for b in scan_result.batteries:
