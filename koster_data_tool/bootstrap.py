@@ -73,6 +73,9 @@ def create_runtime_dirs(paths: AppPaths) -> None:
     _ensure_dir(paths.reports_dir)
     _ensure_dir(paths.cache_dir)
     _ensure_dir(paths.temp_dir)
+    last_root_path = paths.state_dir / "last_root.txt"
+    if not last_root_path.exists():
+        last_root_path.write_text("", encoding="utf-8")
 
 
 def _read_text(p: Path) -> Optional[str]:
