@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from .bootstrap import init_run_context
 from .gui import run_gui
 from .scanner import scan_root
+from .text_parse import detect_delimiter_and_rows, estimate_max_cycle, preclean_lines
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,14 +23,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _write_sample_cv(path: Path) -> None:
     path.write_text(
-        "0.1\t0.2\t0.3\n0.2\t0.3\t0.4\t1 CYCLE\n0.3\t0.4\t0.5\n",
+        "0.10\t0.20\t0.30\n"
+        "0.20\t0.30\t0.40 1 CYCLE\n"
+        "3 CYCLE\n"
+        "0.30\t0.40\t0.50\n"
+        "0.40\t0.50\t0.60 2 CYCLE\n"
+        "0.50\t0.60\t0.70\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd(path: Path) -> None:
     path.write_text(
-        "Time\tVoltage\tCurrent\tCycle\n0\t3.1\t0.5\t1\n1\t3.2\t0.5\t2\n",
+        "Time,Voltage,Current,Cycle\n0,3.1,0.5,1\n1,3.2,0.5,3\n2,3.3,0.5,2\n3,3.4,0.5,3\n",
+        encoding="utf-8",
+    )
+
+
+def _write_sample_gcd_no_cycle(path: Path) -> None:
+    path.write_text(
+        "Time;Voltage;Current\n"
+        "0;3.1;0.5\n"
+        "1;3.2;0.5 1 CYCLE\n"
+        "2 CYCLE\n"
+        "2;3.3;0.5\n",
         encoding="utf-8",
     )
 
@@ -46,6 +64,7 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     struct_a.mkdir(parents=True, exist_ok=True)
     _write_sample_cv(struct_a / "CV-1.txt")
     _write_sample_gcd(struct_a / "GCD-0.5.txt")
+    _write_sample_gcd_no_cycle(struct_a / "GCD-2.txt")
     _write_sample_eis(struct_a / "EIS-1.txt")
 
     struct_b = base_root / "structure_b_root"
@@ -62,12 +81,63 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     return struct_a, struct_b
 
 
+def _estimate_cycle_from_file(file_path: Path, file_type: str) -> int:
+    raw_text = file_path.read_text(encoding="utf-8")
+    clean_lines, marker_events = preclean_lines(raw_text)
+    try:
+        detection = detect_delimiter_and_rows(clean_lines)
+    except ValueError:
+        detection = detect_delimiter_and_rows(clean_lines[1:]) if len(clean_lines) > 1 else detect_delimiter_and_rows(clean_lines)
+
+    has_cycle_col = False
+    cycle_values: list[int] = []
+    if file_type == "GCD":
+        cycle_idx = None
+        for line in clean_lines:
+            if detection["delimiter"] in {"\t", ",", ";"}:
+                tokens = [t.strip() for t in line.split(detection["delimiter"]) if t.strip()]
+            else:
+                tokens = [t.strip() for t in re.split(detection["delimiter"], line) if t.strip()]
+
+            if cycle_idx is None:
+                cycle_idx = next((i for i, tk in enumerate(tokens) if tk.lower() == "cycle"), None)
+                if cycle_idx is None:
+                    continue
+                has_cycle_col = True
+                continue
+            if cycle_idx < len(tokens) and re.match(r"^[+-]?\d+$", tokens[cycle_idx]):
+                cycle_values.append(int(tokens[cycle_idx]))
+
+    has_data_after_last_marker = False
+    if marker_events:
+        last_marker_index = max(event["rawLineIndex"] for event in marker_events)
+        kept_set = set(detection["kept_lines"])
+        for raw_idx, raw_line in enumerate(raw_text.splitlines()):
+            if raw_idx <= last_marker_index:
+                continue
+            if raw_line in kept_set:
+                has_data_after_last_marker = True
+                break
+
+    return estimate_max_cycle(
+        file_type=file_type,
+        has_cycle_col=has_cycle_col,
+        cycle_values=cycle_values if has_cycle_col else None,
+        marker_events=marker_events,
+        has_data_after_last_marker=has_data_after_last_marker,
+    )
+
+
 def _selftest(ctx, logger) -> int:
     temp_root = ctx.paths.temp_dir / f"run_{ctx.run_id}" / "selftest_root"
     struct_a, struct_b = _create_selftest_tree(temp_root)
 
     logger.info("selftest: start", root=str(struct_b))
     print(f"SELFTEST_ROOT={struct_b}")
+
+    assert _estimate_cycle_from_file(struct_a / "CV-1.txt", "CV") == 4, "CV-1.txt maxCycle assertion failed"
+    assert _estimate_cycle_from_file(struct_a / "GCD-0.5.txt", "GCD") == 3, "GCD-1.txt maxCycle assertion failed"
+    assert _estimate_cycle_from_file(struct_a / "GCD-2.txt", "GCD") == 3, "GCD-2.txt maxCycle assertion failed"
 
     result = scan_root(
         root_path=str(struct_b),
