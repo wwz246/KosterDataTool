@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import shutil
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,7 +43,6 @@ def _ensure_dir(p: Path) -> None:
 
 
 def ensure_program_dir_writable(program_dir: Path) -> None:
-    # 尝试创建/写入一个临时文件来判断权限
     test_path = program_dir / ".__koster_write_test__"
     try:
         with test_path.open("w", encoding="utf-8") as f:
@@ -92,12 +88,6 @@ def _write_text(p: Path, s: str) -> None:
 
 
 def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None:
-    """
-    30 天清理：
-    - 每次启动读取 state/last_cleanup.txt；不存在则创建并写入当天日期
-    - 若距离上次清理 >= 30 天，清理 logs/reports/cache/temp 下“最后修改时间早于当前时间 30 天”的文件与空目录
-    - config 与 state 永不删除
-    """
     last_cleanup_path = paths.state_dir / "last_cleanup.txt"
     today = datetime.now().date()
     last_str = _read_text(last_cleanup_path)
@@ -110,7 +100,6 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
     try:
         last_date = datetime.strptime(last_str, "%Y-%m-%d").date()
     except Exception:
-        # 格式异常：按“需要清理”处理，并重写
         last_date = today - timedelta(days=30)
 
     if (today - last_date).days < 30:
@@ -127,7 +116,6 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
     for base in targets:
         if not base.exists():
             continue
-        # 先删旧文件
         for file_path in base.rglob("*"):
             if file_path.is_file():
                 try:
@@ -137,7 +125,6 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
                 except Exception as e:
                     if logger:
                         logger.warning("cleanup: failed to delete file", path=str(file_path), error=str(e))
-        # 再删空目录（自底向上）
         for dir_path in sorted([p for p in base.rglob("*") if p.is_dir()], key=lambda x: len(str(x)), reverse=True):
             try:
                 if not any(dir_path.iterdir()):
@@ -162,6 +149,7 @@ def init_run_context() -> Tuple[RunContext, DualLogger]:
     text_log_path = paths.logs_dir / f"run_{run_id}.log"
     jsonl_log_path = paths.logs_dir / f"run_{run_id}.jsonl"
     report_path = paths.reports_dir / f"run_{run_id}_report.txt"
+    report_path.touch(exist_ok=True)
 
     logger = DualLogger(text_log_path=text_log_path, jsonl_log_path=jsonl_log_path)
     logger.info("startup", run_id=run_id, program_dir=str(program_dir), mode="unknown")
