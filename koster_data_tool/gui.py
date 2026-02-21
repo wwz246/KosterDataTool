@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import tkinter as tk
@@ -47,6 +48,15 @@ class App:
         self.open_folder_var = tk.BooleanVar(value=True)
         self._blink_job = None
         self._blink_on = False
+        self.param_columns = ["name", "cvmax", "gcdmax", "m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
+        self.editable_columns = {3, 4, 5, 6, 7, 8, 9, 10}
+        self.selected_cells: set[tuple[str, int]] = set()
+        self.drag_start_cell: tuple[str, int] | None = None
+        self.error_cells: dict[tuple[str, int], str] = {}
+        self.undo_snapshot: dict[tuple[str, int], str] | None = None
+        self.tooltip: tk.Toplevel | None = None
+        self.tooltip_var = tk.StringVar(value="")
+        self.filter_tab_visible = True
 
         self._build_ui()
         self._load_default_open_dir()
@@ -122,20 +132,52 @@ class App:
         self.sub_notebook.add(self.filter_page, text="极片级筛选")
         self.sub_notebook.pack(fill="both", expand=True, pady=(8, 0))
 
-        self.param_tree = ttk.Treeview(
+        fill_frame = ttk.Frame(self.param_page)
+        fill_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(fill_frame, text="批量输入").pack(side="left")
+        self.param_fill_var = tk.StringVar(value="")
+        ttk.Entry(fill_frame, textvariable=self.param_fill_var, width=22).pack(side="left", padx=6)
+        ttk.Button(fill_frame, text="单值填充", command=self._fill_single_value).pack(side="left", padx=(0, 6))
+        ttk.Button(fill_frame, text="多值粘贴", command=self._paste_multi_value).pack(side="left")
+        ttk.Label(
             self.param_page,
-            columns=("name", "cvmax", "gcdmax", "m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"),
+            text="质量口径提示：半电池其中一侧质量请填 0；质量均为不含集流体的活性层质量。",
+            foreground="#444444",
+        ).pack(anchor="w", pady=(0, 6))
+
+        tree_wrap = ttk.Frame(self.param_page)
+        tree_wrap.pack(fill="both", expand=True)
+
+        self.param_tree = ttk.Treeview(
+            tree_wrap,
+            columns=tuple(self.param_columns),
             show="headings",
             height=10,
         )
         for c, t in [
-            ("name", "电池名"), ("cvmax", "CV最大圈数"), ("gcdmax", "GCD最大圈数"), ("m_pos", "m_pos"), ("m_neg", "m_neg"),
-            ("p_active", "p_active"), ("k", "K"), ("n_cv", "N_CV"), ("n_gcd", "N_GCD"), ("v_start", "V_start"), ("v_end", "V_end"),
+            ("name", "电池名"), ("cvmax", "CV最大圈数"), ("gcdmax", "GCD最大圈数"), ("m_pos", "m_pos(mg)"), ("m_neg", "m_neg(mg)"),
+            ("p_active", "p_active(%)"), ("k", "K(—)"), ("n_cv", "N_CV"), ("n_gcd", "N_GCD"), ("v_start", "V_start(V)"), ("v_end", "V_end(V)"),
         ]:
             self.param_tree.heading(c, text=t)
             self.param_tree.column(c, width=100, anchor="center")
-        self.param_tree.pack(fill="both", expand=True)
+        self.param_tree.tag_configure("row_error", background="#ffeaea")
+        py = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.param_tree.yview)
+        px = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.param_tree.xview)
+        self.param_tree.configure(yscrollcommand=py.set, xscrollcommand=px.set)
+        self.param_tree.grid(row=0, column=0, sticky="nsew")
+        py.grid(row=0, column=1, sticky="ns")
+        px.grid(row=1, column=0, sticky="ew")
+        tree_wrap.columnconfigure(0, weight=1)
+        tree_wrap.rowconfigure(0, weight=1)
         self.param_tree.bind("<Double-1>", self._edit_param_cell)
+        self.param_tree.bind("<Button-1>", self._on_tree_click)
+        self.param_tree.bind("<Shift-Button-1>", self._on_tree_shift_click)
+        self.param_tree.bind("<B1-Motion>", self._on_tree_drag)
+        self.param_tree.bind("<Motion>", self._on_tree_hover)
+        self.param_tree.bind("<Leave>", lambda _e: self._hide_tooltip())
+        self.param_tree.bind("<Control-c>", self._copy_selection)
+        self.param_tree.bind("<Control-v>", self._paste_multi_value)
+        self.param_tree.bind("<Control-z>", self._undo_last_edit)
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
@@ -147,7 +189,10 @@ class App:
             col = ttk.Frame(sel_frame)
             col.grid(row=0, column=i, sticky="nsew", padx=8)
             ttk.Label(col, text=title).pack(anchor="w")
-            w.pack(fill="both", expand=True)
+            ys = ttk.Scrollbar(col, orient="vertical", command=w.yview)
+            w.configure(yscrollcommand=ys.set)
+            w.pack(side="left", fill="both", expand=True)
+            ys.pack(side="right", fill="y")
             sel_frame.columnconfigure(i, weight=1)
 
         btns = ttk.Frame(self.page2)
@@ -158,11 +203,16 @@ class App:
 
     def _on_output_type_change(self):
         output_type = self.output_type_var.get()
+        display_cols = list(self.param_columns)
+        if output_type == "Qsp":
+            display_cols.remove("k")
+        self.param_tree.configure(displaycolumns=display_cols)
         for iid in self.param_tree.get_children():
             vals = list(self.param_tree.item(iid, "values"))
             if output_type == "Qsp":
                 vals[6] = 1
             self.param_tree.item(iid, values=vals)
+        self._refresh_error_states()
 
 
     def _load_default_open_dir(self) -> None:
@@ -251,22 +301,32 @@ class App:
 
     def _fill_step2(self, result: ScanResult):
         self.param_tree.delete(*self.param_tree.get_children())
+        self.selected_cells.clear()
+        self.error_cells.clear()
         for b in sorted(result.batteries, key=lambda x: x.name):
             self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle or 1, b.gcd_max_cycle or 1, 10, 0, 90, 1, 1, 1, 2.5, 4.2))
         self._init_filter_lists(result)
         self._load_cache_or_keep()
         self._on_output_type_change()
+        self._refresh_error_states()
 
     def _init_filter_lists(self, result: ScanResult):
+        show_filter = result.structure == "B" and len(result.batteries) > 1
+        if show_filter and not self.filter_tab_visible:
+            self.sub_notebook.add(self.filter_page, text="极片级筛选")
+            self.filter_tab_visible = True
+        elif not show_filter and self.filter_tab_visible:
+            self.sub_notebook.forget(self.filter_page)
+            self.filter_tab_visible = False
         for lb in (self.bat_list, self.cv_list, self.gcd_list, self.eis_list):
             lb.delete(0, "end")
         for b in sorted(result.batteries, key=lambda x: x.name):
             self.bat_list.insert("end", b.name)
-        for v in result.available_cv:
+        for v in sorted(result.available_cv):
             self.cv_list.insert("end", str(v))
-        for v in result.available_gcd:
+        for v in sorted(result.available_gcd):
             self.gcd_list.insert("end", str(v))
-        for v in result.available_eis:
+        for v in sorted(result.available_eis):
             self.eis_list.insert("end", str(v))
         self.bat_list.select_set(0, "end")
         if self.cv_list.size() > 0:
@@ -275,6 +335,174 @@ class App:
             self.gcd_list.select_set(0)
         if self.eis_list.size() > 0:
             self.eis_list.select_set(self.eis_list.size() - 1)
+
+    def _cell_from_event(self, event) -> tuple[str, int] | None:
+        iid = self.param_tree.identify_row(event.y)
+        col = self.param_tree.identify_column(event.x)
+        if not iid or not col:
+            return None
+        return iid, int(col[1:]) - 1
+
+    def _select_rectangle(self, start: tuple[str, int], end: tuple[str, int]) -> None:
+        rows = list(self.param_tree.get_children())
+        s_row, s_col = start
+        e_row, e_col = end
+        if s_row not in rows or e_row not in rows:
+            return
+        rs, re = sorted([rows.index(s_row), rows.index(e_row)])
+        cs, ce = sorted([s_col, e_col])
+        self.selected_cells = {(rows[r], c) for r in range(rs, re + 1) for c in range(cs, ce + 1)}
+        self.param_tree.selection_set(rows[rs: re + 1])
+
+    def _on_tree_click(self, event):
+        cell = self._cell_from_event(event)
+        if not cell:
+            return
+        self.drag_start_cell = cell
+        self.selected_cells = {cell}
+
+    def _on_tree_shift_click(self, event):
+        cell = self._cell_from_event(event)
+        if not cell:
+            return
+        anchor = self.drag_start_cell or cell
+        self._select_rectangle(anchor, cell)
+        return "break"
+
+    def _on_tree_drag(self, event):
+        if not self.drag_start_cell:
+            return
+        cell = self._cell_from_event(event)
+        if not cell:
+            return
+        self._select_rectangle(self.drag_start_cell, cell)
+
+    def _on_tree_hover(self, event):
+        cell = self._cell_from_event(event)
+        if not cell or cell not in self.error_cells:
+            self._hide_tooltip()
+            return
+        self._show_tooltip(event.x_root + 12, event.y_root + 12, self.error_cells[cell])
+
+    def _show_tooltip(self, x: int, y: int, text: str):
+        if self.tooltip is None:
+            self.tooltip = tk.Toplevel(self.root)
+            self.tooltip.wm_overrideredirect(True)
+            tk.Label(self.tooltip, textvariable=self.tooltip_var, relief="solid", borderwidth=1, background="#fff8dc").pack()
+        self.tooltip_var.set(text)
+        self.tooltip.geometry(f"+{x}+{y}")
+        self.tooltip.deiconify()
+
+    def _hide_tooltip(self):
+        if self.tooltip is not None:
+            self.tooltip.withdraw()
+
+    def _copy_selection(self, _event=None):
+        if not self.selected_cells:
+            return "break"
+        rows = list(self.param_tree.get_children())
+        row_idxs = sorted({rows.index(iid) for iid, _c in self.selected_cells if iid in rows})
+        col_idxs = sorted({c for _iid, c in self.selected_cells})
+        lines = []
+        for r in row_idxs:
+            iid = rows[r]
+            vals = list(self.param_tree.item(iid, "values"))
+            lines.append("\t".join(str(vals[c]) for c in col_idxs))
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+        return "break"
+
+    def _parse_matrix(self, text: str) -> list[list[str]]:
+        lines = [ln for ln in re.split(r"\r?\n", text) if ln != ""]
+        return [ln.split("\t") for ln in lines]
+
+    def _apply_cell_updates(self, updates: dict[tuple[str, int], str], save_undo: bool = True) -> None:
+        if not updates:
+            return
+        if save_undo:
+            self.undo_snapshot = {(iid, c): str(self.param_tree.item(iid, "values")[c]) for iid, c in updates}
+        for (iid, c), nv in updates.items():
+            vals = list(self.param_tree.item(iid, "values"))
+            vals[c] = nv
+            if c == 6 and self.output_type_var.get() == "Qsp":
+                continue
+            self.param_tree.item(iid, values=vals)
+        self._refresh_error_states()
+
+    def _fill_single_value(self):
+        value = self.param_fill_var.get()
+        targets = {(iid, c) for iid, c in self.selected_cells if c in self.editable_columns and not (c == 6 and self.output_type_var.get() == "Qsp")}
+        updates = {k: value for k in targets}
+        self._apply_cell_updates(updates)
+
+    def _paste_multi_value(self, _event=None):
+        text = self.param_fill_var.get().strip()
+        if not text:
+            try:
+                text = self.root.clipboard_get()
+            except Exception:
+                text = ""
+        matrix = self._parse_matrix(text)
+        if not matrix:
+            return "break"
+        rows = list(self.param_tree.get_children())
+        if not rows:
+            return "break"
+        if self.selected_cells:
+            start_row_idx = min(rows.index(iid) for iid, _c in self.selected_cells if iid in rows)
+            start_col = min(c for _iid, c in self.selected_cells)
+        else:
+            start_row_idx, start_col = 0, 3
+        updates: dict[tuple[str, int], str] = {}
+        for dr, line in enumerate(matrix):
+            rr = start_row_idx + dr
+            if rr >= len(rows):
+                break
+            for dc, value in enumerate(line):
+                cc = start_col + dc
+                if cc >= len(self.param_columns):
+                    break
+                if cc not in self.editable_columns:
+                    continue
+                if cc == 6 and self.output_type_var.get() == "Qsp":
+                    continue
+                updates[(rows[rr], cc)] = value
+        self._apply_cell_updates(updates)
+        return "break"
+
+    def _undo_last_edit(self, _event=None):
+        if self.undo_snapshot:
+            self._apply_cell_updates(self.undo_snapshot, save_undo=False)
+            self.undo_snapshot = None
+        return "break"
+
+    def _refresh_error_states(self):
+        self.error_cells.clear()
+        for iid in self.param_tree.get_children():
+            vals = list(self.param_tree.item(iid, "values"))
+            cv_max = coerce_int_strict(str(vals[1]))
+            gcd_max = coerce_int_strict(str(vals[2]))
+            row_errors = validate_battery_row(
+                output_type=self.output_type_var.get(),
+                m_pos=vals[3],
+                m_neg=vals[4],
+                p_active=vals[5],
+                k=vals[6],
+                n_cv=vals[7],
+                n_gcd=vals[8],
+                v_start=vals[9],
+                v_end=vals[10],
+                cv_max=cv_max,
+                gcd_max=gcd_max,
+            )
+            if row_errors:
+                self.param_tree.item(iid, tags=("row_error",))
+                col_map = {"m_pos": 3, "m_neg": 4, "p_active": 5, "k": 6, "n_cv": 7, "n_gcd": 8, "v_start": 9, "v_end": 10}
+                for k, msgs in row_errors.items():
+                    if k in col_map:
+                        self.error_cells[(iid, col_map[k])] = "；".join(msgs)
+            else:
+                self.param_tree.item(iid, tags=())
 
     def _edit_param_cell(self, event):
         iid = self.param_tree.identify_row(event.y)
@@ -296,6 +524,7 @@ class App:
         def save(_e=None):
             old_vals[ci] = editor.get()
             self.param_tree.item(iid, values=old_vals)
+            self._refresh_error_states()
             editor.destroy()
 
         editor.bind("<Return>", save)
