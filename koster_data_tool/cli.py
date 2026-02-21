@@ -11,6 +11,7 @@ from .bootstrap import init_run_context
 from .colmap import parse_file_for_cycles, read_and_map_file
 from .cycle_split import select_cycle_indices, split_cycles
 from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
+from .gcd_window_metrics import compute_gcd_file_metrics
 from .gui import run_gui
 from .scanner import scan_root
 
@@ -31,6 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--p-active", type=float, default=100.0, help="活性物比例 %")
     p.add_argument("--v-start", type=float, default=None, help="起始电压")
     p.add_argument("--v-end", type=float, default=None, help="终止电压")
+    p.add_argument("--gcd-metrics-one", type=str, default="", help="单文件执行 GCD 指标计算")
+    p.add_argument("--output-type", type=str, choices=["Csp", "Qsp"], default="Csp", help="输出类型")
+    p.add_argument("--k-factor", type=float, default=None, help="Csp 的 K 系数")
+    p.add_argument("--n-gcd", type=int, default=1, help="代表圈序号（GCD 指标）")
     return p
 
 
@@ -135,6 +140,38 @@ def _write_sample_gcd_cycle_col(path: Path) -> None:
     )
 
 
+def _write_sample_gcd_metrics(path: Path) -> None:
+    path.write_text(
+        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
+        "0,2.4,1,1,1,0.00,0.00\n"
+        "1,3.0,1,1,1,0.28,0.00\n"
+        "2,4.4,1,1,1,0.56,0.00\n"
+        "3,4.3,-1,2,1,0.56,0.05\n"
+        "4,3.5,-1,2,1,0.56,0.32\n"
+        "5,2.3,-1,2,1,0.56,0.58\n"
+        "6,2.4,1,3,2,0.00,0.00\n"
+        "7,3.1,1,3,2,0.30,0.00\n"
+        "8,4.3,1,3,2,0.57,0.00\n"
+        "9,4.3,-1,4,2,0.57,0.07\n"
+        "10,3.6,-1,4,2,0.57,0.34\n"
+        "11,2.3,-1,4,2,0.57,0.61\n",
+        encoding="utf-8",
+    )
+
+
+def _write_sample_gcd_capacity_only(path: Path) -> None:
+    path.write_text(
+        "Time,Voltage,Step,Cycle,Q_chg,Q_dis\n"
+        "0,2.4,1,1,0.00,0.00\n"
+        "1,3.0,1,1,0.28,0.00\n"
+        "2,4.4,1,1,0.56,0.00\n"
+        "3,4.3,2,1,0.56,0.05\n"
+        "4,3.5,2,1,0.56,0.32\n"
+        "5,2.3,2,1,0.56,0.58\n",
+        encoding="utf-8",
+    )
+
+
 def _write_sample_eis_cycle_none(path: Path) -> None:
     path.write_text("Freq,Zre,Zim\n1,2,3\n2,3,4\n3,4,5\n", encoding="utf-8")
 
@@ -157,6 +194,8 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_cv_cycle_rules(struct_a / "CV-10.txt")
     _write_sample_gcd_cycle_col(struct_a / "GCD-10.txt")
     _write_sample_eis_cycle_none(struct_a / "EIS-10.txt")
+    _write_sample_gcd_metrics(struct_a / "GCD-1.txt")
+    _write_sample_gcd_capacity_only(struct_a / "GCD-4.txt")
 
     struct_b = base_root / "structure_b_root"
     for bat in ("Battery_A", "Battery_B"):
@@ -452,6 +491,26 @@ def _selftest(ctx, logger) -> int:
     run = subprocess.run(cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
     assert run.returncode == 0, f"gcd-seg-one cli assertion failed: {run.stderr}"
 
+    metrics = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-1.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics.fatal_error != "E5201:代表圈电压窗截取失败", "代表圈不得触发 E5201"
+    metrics_capacity = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-4.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics_capacity.cycles[1].delta_q_source == "capacity", "W5101 样例应为 capacity 源"
+    ce_raw = 100 * (metrics.cycles[1].delta_q_dis / metrics.cycles[1].delta_q_chg)
+    ce_rounded_proxy = 100 * (round(metrics.cycles[1].delta_q_dis, 2) / round(metrics.cycles[1].delta_q_chg, 2))
+    assert abs(ce_raw - ce_rounded_proxy) > 1e-6, "CE 必须用未取整 ΔQ"
+
     result = scan_root(
         root_path=str(struct_b),
         program_dir=str(ctx.paths.program_dir),
@@ -488,6 +547,43 @@ def _run_scan_only(ctx, root_arg: str) -> int:
     return 0
 
 
+def _run_gcd_metrics_one(ctx, logger, args) -> int:
+    fpath = Path(args.gcd_metrics_one).expanduser().resolve()
+    metrics = compute_gcd_file_metrics(
+        file_path=str(fpath),
+        root_params={
+            "v_start": args.v_start,
+            "v_end": args.v_end,
+            "a_geom": args.a_geom,
+            "output_type": args.output_type,
+            "k_factor": args.k_factor,
+            "n_gcd": args.n_gcd,
+        },
+        battery_params={"m_pos": args.m_pos, "m_neg": args.m_neg, "p_active": args.p_active},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    rep = metrics.cycles.get(metrics.n_gcd)
+    ce = None
+    if rep and rep.delta_q_chg and rep.delta_q_dis:
+        ce = 100.0 * rep.delta_q_dis / rep.delta_q_chg
+    print(f"file_path={metrics.file_path}")
+    print(f"j_label={metrics.j_label}")
+    print(f"main_order={metrics.main_order}")
+    print(f"fatal_error={metrics.fatal_error}")
+    print(f"representative_cycle_ok={metrics.representative_cycle_ok}")
+    if rep is not None:
+        print(f"rep_delta_t={rep.delta_t}")
+        print(f"rep_delta_q_chg={rep.delta_q_chg}")
+        print(f"rep_delta_q_dis={rep.delta_q_dis}")
+        print(f"rep_ce={ce}")
+        print(f"rep_r_turn={rep.r_turn}")
+        print(f"rep_warnings={rep.warnings}")
+    print(f"warnings={metrics.warnings}")
+    print(f"run_report_path={ctx.report_path}")
+    return 0
+
+
 def _run_cli(args) -> int:
     ctx, logger = init_run_context()
     logger.info("mode", mode="CLI")
@@ -503,6 +599,9 @@ def _run_cli(args) -> int:
 
     if args.gcd_seg_one:
         return _run_gcd_seg_one(ctx, logger, args)
+
+    if args.gcd_metrics_one:
+        return _run_gcd_metrics_one(ctx, logger, args)
 
     if args.parse_one:
         fpath = Path(args.parse_one).expanduser().resolve()
