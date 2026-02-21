@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
 import threading
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 from .bootstrap import init_run_context
 from .colmap import parse_file_for_cycles, read_and_map_file
 from .curve_export import export_cv_block, export_eis_block, export_gcd_block
+from .export_pipeline import run_full_export
 from .cycle_split import select_cycle_indices, split_cycles
 from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
 from .gcd_window_metrics import compute_gcd_file_metrics
@@ -37,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--v-end", type=float, default=None, help="终止电压")
     p.add_argument("--gcd-metrics-one", type=str, default="", help="单文件执行 GCD 指标计算")
     p.add_argument("--output-type", type=str, choices=["Csp", "Qsp"], default="Csp", help="输出类型")
+    p.add_argument("--export", action="store_true", help="执行端到端导出")
+    p.add_argument("--params-json", type=str, default="", help="每电池参数 JSON 文件")
     p.add_argument("--k-factor", type=float, default=None, help="Csp 的 K 系数")
     p.add_argument("--n-gcd", type=int, default=1, help="代表圈序号（GCD 指标）")
     p.add_argument("--rate-selftest", action="store_true", help="打印 Step8 的 Rate/Retention 自检摘要")
@@ -653,6 +659,47 @@ def _selftest(ctx, logger) -> int:
     )
     assert any("W1304" in w for w in rate_bad.warnings), "X0<=0 应触发 W1304"
 
+    # step9: 全链路导出回归
+    before = {p.name for p in struct_b.iterdir() if p.is_file()}
+    export_cmd = ["python", "main.py", "--no-gui", "--root", str(struct_b), "--export", "--output-type", "Csp"]
+    run_export = subprocess.run(export_cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    assert run_export.returncode == 0, f"export cli assertion failed: {run_export.stderr}\n{run_export.stdout}"
+    after = {p.name for p in struct_b.iterdir() if p.is_file()}
+    diff = sorted(after - before)
+    assert len(diff) == 2 and all(x.endswith('.xlsx') for x in diff), f"root 新增文件应仅2个xlsx: {diff}"
+
+    # 报告/日志必须在 program_dir/KosterData
+    for line in run_export.stdout.splitlines():
+        if any(line.startswith(k) for k in ("run_report_path=", "log_path=", "jsonl_log_path=")):
+            path = line.split("=", 1)[1].strip()
+            assert "KosterData" in Path(path).parts, f"非KosterData路径: {path}"
+
+    xlsx_paths = [struct_b / name for name in diff]
+    battery_wb = None
+    electrode_wb = None
+    for xp in xlsx_paths:
+        wb = load_workbook(xp)
+        if "参数汇总" in wb.sheetnames:
+            battery_wb = wb
+        if "Rate" in wb.sheetnames:
+            electrode_wb = wb
+    assert battery_wb is not None and electrode_wb is not None, "应同时生成极片级与电池级"
+
+    assert "参数汇总" in battery_wb.sheetnames, "电池级应有参数汇总"
+    for b in scan_root(str(struct_b), str(ctx.paths.program_dir), ctx.run_id, threading.Event(), None).batteries:
+        assert b.name in battery_wb.sheetnames, f"电池级缺少sheet:{b.name}"
+
+    assert "Rate" in electrode_wb.sheetnames, "极片级缺少Rate"
+    assert any(n.startswith("CV-") for n in electrode_wb.sheetnames), "极片级缺少CV sheet"
+    assert any(n.startswith("GCD-") for n in electrode_wb.sheetnames), "极片级缺少GCD sheet"
+    assert any(n.startswith("EIS-") for n in electrode_wb.sheetnames), "极片级缺少EIS sheet"
+
+    ps = battery_wb["参数汇总"]
+    texts = [str(ps.cell(row=r, column=1).value or "") for r in range(1, min(120, ps.max_row + 1))]
+    idx_param = next(i for i, t in enumerate(texts, start=1) if t == "电池名")
+    idx_detail = next(i for i, t in enumerate(texts, start=1) if t == "电池名" and i > idx_param)
+    assert idx_detail - idx_param > 5, "参数表与逐圈结果表间必须有5空行"
+
     logger.info("selftest: ok", structure_a=str(struct_a), structure_b=str(struct_b))
     return 0
 
@@ -762,12 +809,67 @@ def _run_rate_selftest(ctx, logger, args) -> int:
     print(f"run_report_path={ctx.report_path}")
     return 0
 
+
+def _default_params_for_scan(scan_result, output_type: str) -> dict:
+    battery_params = {}
+    for b in scan_result.batteries:
+        battery_params[b.name] = {
+            "m_pos": 10.0,
+            "m_neg": 0.0,
+            "p_active": 90.0,
+            "k": 1.0,
+            "n_cv": 1,
+            "n_gcd": 1,
+            "v_start": 2.5,
+            "v_end": 4.2,
+            "main_order": "先充后放",
+        }
+    return {
+        "a_geom": 1.0,
+        "output_type": output_type,
+        "export_battery_workbook": True,
+        "battery_params": battery_params,
+    }
+
+
+def _load_or_default_params(args, scan_result):
+    if args.params_json:
+        return json.loads(Path(args.params_json).read_text(encoding="utf-8"))
+    return _default_params_for_scan(scan_result, args.output_type)
+
+
+def _run_export(ctx, logger, args) -> int:
+    if not args.root:
+        raise ValueError("--export 需要 --root")
+    root = Path(args.root).expanduser().resolve()
+    scan_result = scan_root(str(root), str(ctx.paths.program_dir), ctx.run_id, threading.Event(), None)
+    params = _load_or_default_params(args, scan_result)
+    params["a_geom"] = args.a_geom
+    params["output_type"] = args.output_type
+    selections = {
+        "batteries": [b.name for b in scan_result.batteries],
+        "cv_nums": [str(x) for x in scan_result.available_cv[:1]],
+        "gcd_nums": [str(x) for x in scan_result.available_gcd[:1]],
+        "eis_nums": [str(scan_result.available_eis[-1])] if scan_result.available_eis else [],
+    }
+
+    result = run_full_export(str(root), scan_result, params, selections, ctx, logger, None)
+    print(f"electrode_path={result['electrode_path']}")
+    print(f"battery_path={result['battery_path']}")
+    print(f"run_report_path={result['run_report_path']}")
+    print(f"log_path={result['log_path']}")
+    print(f"jsonl_log_path={result['jsonl_log_path']}")
+    return 0
+
 def _run_cli(args) -> int:
     ctx, logger = init_run_context()
     logger.info("mode", mode="CLI")
 
     if args.selftest:
         return _selftest(ctx, logger)
+
+    if args.export:
+        return _run_export(ctx, logger, args)
 
     if args.scan_only:
         return _run_scan_only(ctx, args.root)
