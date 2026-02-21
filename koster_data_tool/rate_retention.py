@@ -9,6 +9,7 @@ from .colmap import _append_run_report
 from .export_blocks import Block3Header
 from .gcd_segment import calc_m_active_g
 from .gcd_window_metrics import compute_gcd_file_metrics
+from .run_report import report_warning
 
 
 @dataclass
@@ -120,9 +121,8 @@ def build_rate_and_retention_for_battery(
         x0 = col[0]
         x1 = col[-1]
         if math.isnan(x0) or x0 <= 0:
-            msg = "W1304 保持率基准缺失/非正"
+            msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0，整列NA")
             logger.warning(msg, code="W1304")
-            _append_run_report(run_report_path, msg)
             warnings.append(msg)
             retention_cols[ci] = ["NA" for _ in col]
         else:

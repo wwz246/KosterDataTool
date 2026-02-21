@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 
 from .paths import get_program_dir
 from .logging_utils import DualLogger
+from . import __version__
 
 
 FATAL_NOT_WRITABLE_MESSAGE = "程序所在文件夹不可写，请将程序放到可写目录（例如桌面/文档）后重试"
@@ -31,6 +32,7 @@ class RunContext:
     text_log_path: Path
     jsonl_log_path: Path
     report_path: Path
+    run_temp_dir: Path
 
 
 def make_run_id(now: Optional[datetime] = None) -> str:
@@ -171,10 +173,12 @@ def init_run_context() -> Tuple[RunContext, DualLogger]:
     text_log_path = paths.logs_dir / f"run_{run_id}.log"
     jsonl_log_path = paths.logs_dir / f"run_{run_id}.jsonl"
     report_path = paths.reports_dir / f"run_{run_id}_report.txt"
+    run_temp_dir = paths.temp_dir / f"run_{run_id}"
     report_path.touch(exist_ok=True)
+    run_temp_dir.mkdir(parents=True, exist_ok=True)
 
     logger = DualLogger(text_log_path=text_log_path, jsonl_log_path=jsonl_log_path)
-    logger.info("startup", run_id=run_id, program_dir=str(program_dir), mode="unknown")
+    logger.info("startup", run_id=run_id, program_dir=str(program_dir), mode="unknown", version=__version__)
 
     cleanup_if_due(paths, logger=logger)
     _ = load_optional_config(paths, logger=logger)
@@ -185,5 +189,6 @@ def init_run_context() -> Tuple[RunContext, DualLogger]:
         text_log_path=text_log_path,
         jsonl_log_path=jsonl_log_path,
         report_path=report_path,
+        run_temp_dir=run_temp_dir,
     )
     return ctx, logger

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .text_parse import detect_delimiter_and_rows_indexed, preclean_indexed_lines
+from .run_report import report_error, report_warning
 
 
 @dataclass
@@ -295,8 +296,8 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
             continue
     if raw_text is None:
         err = f"E6001 文件读取失败（编码不支持） file={file_path}"
-        logger.error(err, code="E6001", file_path=file_path)
-        _append_run_report(run_report_path, err)
+        line = report_error(run_report_path, "E6001", "文件读取失败（编码不支持）", file=file_path)
+        logger.error(line, code="E6001", file_path=file_path)
         raise ValueError(err)
     raw_lines = raw_text.splitlines()
     indexed_lines, marker_events = preclean_indexed_lines(raw_text)
@@ -308,10 +309,9 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
 
     warnings: list[str] = []
     if detection["dropped_count"] > 0:
-        w = f"W6101:dropped non-mode lines count={detection['dropped_count']} file={file_path}"
-        warnings.append(w)
-        logger.warning(w, code="W6101", file=file_path, dropped_count=detection["dropped_count"])
-        _append_run_report(run_report_path, w)
+        line = report_warning(run_report_path, "W6101", "丢弃非众数列行", count=detection["dropped_count"], file=file_path)
+        warnings.append(line)
+        logger.warning(line, code="W6101", file=file_path, dropped_count=detection["dropped_count"])
 
     kept_rows = detection["kept_rows"]
     kept_raw_line_indices = [raw_idx for raw_idx, _ in kept_rows]
@@ -326,10 +326,11 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
         unit_raw = {}
         col_index, infer_warnings = infer_columns_no_header(file_type, data_cols, v_start, v_end)
         warnings.extend(infer_warnings)
+        logger.info("no-header inference reasons", file=file_path, reasons=infer_warnings)
         if any(w.startswith("E6101") for w in infer_warnings):
             err = next(w for w in infer_warnings if w.startswith("E6101"))
-            logger.error(err, code="E6101", file=file_path)
-            _append_run_report(run_report_path, f"{err} file={file_path}")
+            line = report_error(run_report_path, "E6101", err, file=file_path)
+            logger.error(line, code="E6101", file=file_path)
             raise ValueError(err)
 
     unit_norm, series, convert_warnings = convert_units(col_index, unit_raw, data_cols, a_geom_cm2)
@@ -340,6 +341,7 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
         logger.info("no-header mapping", file=file_path, mapping=mapping_desc)
     else:
         logger.info("header mapping", file=file_path, mapping=mapping_desc)
+    logger.info("column mapping detail", file=file_path, no_header=no_header, warnings=warnings)
 
     mapping = ColumnMapping(
         file_type=file_type,
