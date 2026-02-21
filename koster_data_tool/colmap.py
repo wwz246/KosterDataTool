@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from .text_parse import detect_delimiter_and_rows, preclean_lines
+from .text_parse import detect_delimiter_and_rows_indexed, preclean_indexed_lines
 
 
 @dataclass
@@ -272,15 +272,28 @@ def _append_run_report(run_report_path: str, text: str) -> None:
         f.write(text + "\n")
 
 
-def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str, list[float]]]:
+
+
+def _extract_cycle_values(series: dict[str, list[float]]) -> tuple[bool, list[int] | None]:
+    if "Cycle" not in series:
+        return False, None
+    vals: list[int] = []
+    for v in series["Cycle"]:
+        if abs(v - round(v)) > 1e-6:
+            return True, None
+        vals.append(int(round(v)))
+    return True, vals
+
+
+def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str,list[float]], list[int], list[dict], bool, list[int] | None]:
     raw_text = Path(file_path).read_text(encoding="utf-8")
     raw_lines = raw_text.splitlines()
-    clean_lines, marker_events = preclean_lines(raw_text)
-    _ = marker_events
+    indexed_lines, marker_events = preclean_indexed_lines(raw_text)
     try:
-        detection = detect_delimiter_and_rows(clean_lines)
+        detection = detect_delimiter_and_rows_indexed(indexed_lines)
     except ValueError:
-        detection = detect_delimiter_and_rows(clean_lines[1:]) if len(clean_lines) > 1 else detect_delimiter_and_rows(clean_lines)
+        trimmed = indexed_lines[1:] if len(indexed_lines) > 1 else indexed_lines
+        detection = detect_delimiter_and_rows_indexed(trimmed)
 
     warnings: list[str] = []
     if detection["dropped_count"] > 0:
@@ -289,13 +302,17 @@ def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start
         logger.warning(w, code="W6101", file=file_path, dropped_count=detection["dropped_count"])
         _append_run_report(run_report_path, w)
 
+    kept_rows = detection["kept_rows"]
+    kept_raw_line_indices = [raw_idx for raw_idx, _ in kept_rows]
+    data_matrix = [row for _, row in kept_rows]
+    data_cols = [] if not data_matrix else [[row[i] for row in data_matrix] for i in range(len(data_matrix[0]))]
+
     header_idx = find_header_row(raw_lines)
     no_header = header_idx is None
     if header_idx is not None:
         col_index, unit_raw = map_columns_from_header(file_type, raw_lines[header_idx], detection["delimiter"])
     else:
         unit_raw = {}
-        data_cols = _to_data_cols(detection["kept_lines"], detection["delimiter"], detection["modeCols"])
         col_index, infer_warnings = infer_columns_no_header(file_type, data_cols, v_start, v_end)
         warnings.extend(infer_warnings)
         if any(w.startswith("E6101") for w in infer_warnings):
@@ -304,7 +321,6 @@ def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start
             _append_run_report(run_report_path, f"{err} file={file_path}")
             raise ValueError(err)
 
-    data_cols = _to_data_cols(detection["kept_lines"], detection["delimiter"], detection["modeCols"])
     unit_norm, series, convert_warnings = convert_units(col_index, unit_raw, data_cols, a_geom_cm2)
     warnings.extend(convert_warnings)
 
@@ -323,6 +339,19 @@ def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start
         col_index=col_index,
         unit=unit_norm,
         warnings=warnings,
+    )
+    has_cycle_col, cycle_values = _extract_cycle_values(series)
+    return mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values
+
+def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str, list[float]]]:
+    mapping, series, _kept_raw_line_indices, _marker_events, _has_cycle_col, _cycle_values = parse_file_for_cycles(
+        file_path=file_path,
+        file_type=file_type,
+        a_geom_cm2=a_geom_cm2,
+        v_start=v_start,
+        v_end=v_end,
+        logger=logger,
+        run_report_path=run_report_path,
     )
     return mapping, series
 
