@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import median
 
 from .colmap import _append_run_report, parse_file_for_cycles
+from .run_report import report_error, report_warning
 from .cycle_split import split_cycles
 from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
 
@@ -291,15 +292,13 @@ def compute_one_cycle_metrics(
         dq2 = abs(Q2[-1] - Q2[0])
         dq1_eff = math.nan if len(Q1) < 3 else abs(Q1[-1] - Q1[1])
         dq2_eff = math.nan if len(Q2) < 3 else abs(Q2[-1] - Q2[1])
-        w = f"W5101 缺电流，已用容量列差分计算 ΔQ file_path={file_path} cycle={cycle_k}"
-        warnings.append(w)
-        logger.warning(w, code="W5101", cycle_k=cycle_k, file_path=file_path, delta_q_source="capacity")
-        _append_run_report(run_report_path, w)
+        line = report_warning(run_report_path, "W5101", "容量差分算ΔQ", file_path=file_path, cycle=cycle_k)
+        warnings.append(line)
+        logger.warning(line, code="W5101", cycle_k=cycle_k, file_path=file_path, delta_q_source="capacity")
     else:
-        err = f"E5102 缺电流且缺容量列，ΔQ 无法计算 file_path={file_path} cycle={cycle_k}"
-        warnings.append(err)
-        logger.error(err, code="E5102", cycle_k=cycle_k, file_path=file_path)
-        _append_run_report(run_report_path, err)
+        line = report_error(run_report_path, "E5102", "缺电流且缺容量", file_path=file_path, cycle=cycle_k)
+        warnings.append(line)
+        logger.error(line, code="E5102", cycle_k=cycle_k, file_path=file_path)
         return GcdCycleMetrics(cycle_k, True, delta_t, delta_t_samp, None, None, None, None, None, delta_v_noir, None, None, None, None, warnings)
 
     if len(t1) < 3 or len(t2) < 3:
@@ -332,7 +331,9 @@ def compute_one_cycle_metrics(
         i2 = median(seg2_raw["I"])
     if i1 is None or i2 is None:
         r_turn = math.nan
-        warnings.append("缺电流无法算R_turn")
+        line = report_warning(run_report_path, "W1103", "缺电流无法算R_turn", file_path=file_path, cycle=cycle_k)
+        warnings.append(line)
+        logger.warning(line, code="W1103", file_path=file_path, cycle=cycle_k)
     else:
         di_turn = abs(i2 - i1)
         r_turn = math.nan if di_turn <= 0 else r_drop / di_turn
@@ -494,8 +495,7 @@ def compute_gcd_file_metrics(
 
     rep_ok = bool(cycles.get(n_gcd) and cycles[n_gcd].ok_window)
     if not rep_ok:
-        fatal_error = f"E5201 选定圈无法按电压窗截取 file_path={file_path} n_gcd={n_gcd}"
+        fatal_error = report_error(run_report_path, "E5201", "选定圈无法按电压窗截取", file_path=file_path, n_gcd=n_gcd)
         logger.error(fatal_error, code="E5201", file_path=file_path, n_gcd=n_gcd)
-        _append_run_report(run_report_path, fatal_error)
 
     return GcdConditionMetrics(file_path=file_path, j_label=j_label, main_order=main_order, n_gcd=n_gcd, representative_cycle_ok=rep_ok, cycles=cycles, fatal_error=fatal_error, warnings=file_warnings)

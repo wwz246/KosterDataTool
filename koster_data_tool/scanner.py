@@ -120,7 +120,7 @@ def _detect_file(file_name: str, abs_path: Path) -> Optional[RecognizedFile]:
 
 
 def _sort_recognized(files: list[RecognizedFile]) -> list[RecognizedFile]:
-    return sorted(files, key=lambda x: x.num)
+    return sorted(files, key=lambda x: (x.num, Path(x.path).name.lower()))
 
 
 def _safe_read_text(path: Path) -> Optional[str]:

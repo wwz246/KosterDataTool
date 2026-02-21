@@ -418,7 +418,7 @@ def _run_gcd_seg_one(ctx, logger, args) -> int:
 
 
 def _selftest(ctx, logger) -> int:
-    temp_root = ctx.paths.temp_dir / f"run_{ctx.run_id}" / "selftest_root"
+    temp_root = ctx.run_temp_dir / "selftest_root"
     struct_a, struct_b = _create_selftest_tree(temp_root)
 
     logger.info("selftest: start", root=str(struct_b))
@@ -476,6 +476,7 @@ def _selftest(ctx, logger) -> int:
             run_report_path=str(ctx.report_path),
         )
     except ValueError as e:
+        logger.exception("selftest expected parse failure", exc=e)
         failed = "E6101" in str(e)
     assert failed, "EIS-5 must fail with E6101"
     assert "E6101" in Path(ctx.report_path).read_text(encoding="utf-8"), "run_report must contain E6101"
@@ -526,6 +527,7 @@ def _selftest(ctx, logger) -> int:
     try:
         _run_split_one(ctx, logger, str(struct_a / "CV-10.txt"), 1, 1.0, 2.5, 4.2)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("selftest split_one failed", exc=exc)
         raise AssertionError(f"CV-10.txt split_one assertion failed: {exc}") from exc
 
     _mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values = parse_file_for_cycles(
@@ -727,7 +729,14 @@ def _selftest(ctx, logger) -> int:
     return 0
 
 
-def _run_scan_only(ctx, root_arg: str) -> int:
+def _log_recognized_files(logger, scan_result) -> None:
+    for battery in scan_result.batteries:
+        for file_type, files in (("CV", battery.cv_files), ("GCD", battery.gcd_files), ("EIS", battery.eis_files)):
+            for rf in files:
+                logger.info("recognized file", battery=battery.name, file_type=file_type, num=rf.num, path=str(Path(rf.path).resolve()))
+
+
+def _run_scan_only(ctx, logger, root_arg: str) -> int:
     if not root_arg:
         raise ValueError("--scan-only 需要同时传入 --root <dir>")
 
@@ -740,6 +749,7 @@ def _run_scan_only(ctx, root_arg: str) -> int:
         progress_cb=None,
     )
     write_last_root(ctx.paths.state_dir, root)
+    _log_recognized_files(logger, result)
 
     print(f"structure={result.structure}")
     print(f"batteries={len(result.batteries)}")
@@ -814,7 +824,7 @@ def _run_curve_one(ctx, logger, args) -> int:
 
 
 def _run_rate_selftest(ctx, logger, args) -> int:
-    temp_root = ctx.paths.temp_dir / f"run_{ctx.run_id}" / "selftest_root"
+    temp_root = ctx.run_temp_dir / "selftest_root"
     _create_selftest_tree(temp_root)
     bat = temp_root / "step8" / "battery_rate_ok"
     gcd_files = sorted(str(x) for x in bat.glob("GCD-*.txt"))
@@ -867,6 +877,7 @@ def _run_export(ctx, logger, args) -> int:
         raise ValueError("--export 需要 --root")
     root = Path(args.root).expanduser().resolve()
     scan_result = scan_root(str(root), str(ctx.paths.program_dir), ctx.run_id, threading.Event(), None)
+    _log_recognized_files(logger, scan_result)
     write_last_root(ctx.paths.state_dir, root)
     params = _load_or_default_params(args, scan_result)
     params["a_geom"] = args.a_geom
@@ -899,7 +910,7 @@ def _run_cli(args) -> int:
         return _run_export(ctx, logger, args)
 
     if args.scan_only:
-        return _run_scan_only(ctx, args.root)
+        return _run_scan_only(ctx, logger, args.root)
 
     if args.curve_one:
         return _run_curve_one(ctx, logger, args)

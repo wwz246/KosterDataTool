@@ -58,6 +58,8 @@ class App:
         self.tooltip: tk.Toplevel | None = None
         self.tooltip_var = tk.StringVar(value="")
         self.filter_tab_visible = True
+        self._final_stage_seen = False
+        self._pending_export_result: dict | None = None
 
         self._build_ui()
         self._load_default_open_dir()
@@ -278,6 +280,7 @@ class App:
                 kind, payload = self.msg_q.get_nowait()
                 if kind == "done":
                     self.scan_result = payload
+                    self._log_recognized_files(payload)
                     self._fill_step2(payload)
                     self.notebook.select(self.page2)
                     self.start_scan_btn.configure(state="normal")
@@ -298,11 +301,31 @@ class App:
                     self.current_var.set(current)
                     self.percent_var.set(f"{percent:.1f}%")
                     self.progress_value_var.set(percent)
+                    if stage == "结束弹窗（失败/告警清单）" and abs(percent - 100.0) < 1e-9:
+                        self._final_stage_seen = True
+                        if self._pending_export_result is not None:
+                            self._on_export_done(self._pending_export_result)
+                            self._pending_export_result = None
                 elif kind == "export_done":
-                    self._on_export_done(payload)
+                    if self._final_stage_seen:
+                        self._on_export_done(payload)
+                    else:
+                        self._pending_export_result = payload
         except queue.Empty:
             pass
         self.root.after(120, self._poll_queue)
+
+    def _log_recognized_files(self, result: ScanResult) -> None:
+        for battery in result.batteries:
+            for file_type, files in (("CV", battery.cv_files), ("GCD", battery.gcd_files), ("EIS", battery.eis_files)):
+                for rf in files:
+                    self.logger.info(
+                        "recognized file",
+                        battery=battery.name,
+                        file_type=file_type,
+                        num=rf.num,
+                        path=str(Path(rf.path).resolve()),
+                    )
 
     def _fill_step2(self, result: ScanResult):
         self.param_tree.delete(*self.param_tree.get_children())
@@ -709,11 +732,15 @@ class App:
         def progress(stage, current, percent):
             self.msg_q.put(("progress", (stage, current, percent)))
 
+        self._final_stage_seen = False
+        self._pending_export_result = None
+
         def worker():
             try:
                 result = run_full_export(str(self.selected_root), self.scan_result, params, sels, self.ctx, self.logger, progress)
                 self.msg_q.put(("export_done", result))
             except Exception as e:
+                self.logger.exception("gui export worker failed", exc=e)
                 self.msg_q.put(("export_done", {"error": str(e)}))
 
         self.export_thread = threading.Thread(target=worker, daemon=True)
