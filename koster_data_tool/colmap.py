@@ -286,7 +286,18 @@ def _extract_cycle_values(series: dict[str, list[float]]) -> tuple[bool, list[in
 
 
 def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str,list[float]], list[int], list[dict], bool, list[int] | None]:
-    raw_text = Path(file_path).read_text(encoding="utf-8")
+    raw_text = None
+    for enc in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
+        try:
+            raw_text = Path(file_path).read_text(encoding=enc)
+            break
+        except Exception:
+            continue
+    if raw_text is None:
+        err = f"E6001 文件读取失败（编码不支持） file={file_path}"
+        logger.error(err, code="E6001", file_path=file_path)
+        _append_run_report(run_report_path, err)
+        raise ValueError(err)
     raw_lines = raw_text.splitlines()
     indexed_lines, marker_events = preclean_indexed_lines(raw_text)
     try:

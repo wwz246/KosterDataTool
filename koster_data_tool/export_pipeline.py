@@ -8,6 +8,23 @@ from .param_validation import validate_battery_row, validate_global
 from .workbook_builders import build_battery_workbook, build_electrode_workbook
 
 
+def _collect_report_messages(report_path: Path) -> tuple[list[str], list[str]]:
+    failures: list[str] = []
+    warnings: list[str] = []
+    if not report_path.exists():
+        return failures, warnings
+    for raw in report_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("W"):
+            warnings.append(line)
+        elif line.startswith("E") or line.startswith("文件失败:") or " 文件失败 " in line:
+            failures.append(line)
+    return failures, warnings
+
+
+
 def run_full_export(root_path: str, scan_result, params, selections, ctx, logger, progress_cb) -> dict:
     failures: list[str] = []
     warnings: list[str] = []
@@ -76,6 +93,9 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
     emit("结束汇总", 95.0, "report")
     _append_run_report(str(ctx.report_path), f"electrode_workbook={electrode_path}")
     _append_run_report(str(ctx.report_path), f"battery_workbook={battery_path if bat_wb is not None else '(disabled)'}")
+    agg_failures, agg_warnings = _collect_report_messages(Path(ctx.report_path))
+    failures = list(dict.fromkeys([*failures, *agg_failures]))
+    warnings = list(dict.fromkeys([*warnings, *agg_warnings]))
     _append_run_report(str(ctx.report_path), f"failures={len(failures)} warnings={len(warnings)}")
 
     emit("完成", 100.0, "done")
@@ -85,6 +105,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
         "run_report_path": str(ctx.report_path),
         "log_path": str(ctx.text_log_path),
         "jsonl_log_path": str(ctx.jsonl_log_path),
+        "skipped_paths_path": str(ctx.paths.reports_dir / f"skipped_paths-{ctx.run_id}.txt"),
         "failures": failures,
         "warnings": warnings,
     }

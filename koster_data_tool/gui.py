@@ -31,6 +31,7 @@ class App:
         self.export_thread: threading.Thread | None = None
         self.msg_q: queue.Queue = queue.Queue()
         self.last_scan_root: str | None = None
+        self.default_row_values = {"m_pos": 10, "m_neg": 0, "p_active": 90, "k": 1, "n_cv": 1, "n_gcd": 1, "v_start": 2.5, "v_end": 4.2}
 
         self.stage_var = tk.StringVar(value="待机")
         self.current_var = tk.StringVar(value="-")
@@ -115,6 +116,7 @@ class App:
     def _build_step2(self) -> None:
         options = ttk.LabelFrame(self.page2, text="全局选项", padding=10)
         options.pack(fill="x")
+        ttk.Label(self.page2, text="提示：R_turn 不是 RΩ，也不是 EIS 的 Rs；它是换向点表观ESR(DC)，用于工程对比。", foreground="#8a4b00").pack(anchor="w", pady=(6, 6))
         ttk.Label(options, text="输出类型").grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(options, text="Csp", variable=self.output_type_var, value="Csp", command=self._on_output_type_change).grid(row=0, column=1, sticky="w")
         ttk.Radiobutton(options, text="Qsp", variable=self.output_type_var, value="Qsp", command=self._on_output_type_change).grid(row=0, column=2, sticky="w")
@@ -226,7 +228,10 @@ class App:
         chosen = filedialog.askdirectory(initialdir=str(self.default_open_dir))
         if not chosen:
             return
-        self.selected_root = Path(chosen).resolve()
+        new_root = Path(chosen).resolve()
+        if self.selected_root is not None and new_root != self.selected_root:
+            self._drop_cache_for_root(str(self.selected_root))
+        self.selected_root = new_root
         self.root_path_var.set(str(self.selected_root))
         self.start_scan_btn.configure(state="normal")
         write_last_root(self.ctx.paths.state_dir, self.selected_root)
@@ -304,7 +309,7 @@ class App:
         self.selected_cells.clear()
         self.error_cells.clear()
         for b in sorted(result.batteries, key=lambda x: x.name):
-            self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle or 1, b.gcd_max_cycle or 1, 10, 0, 90, 1, 1, 1, 2.5, 4.2))
+            self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle if b.cv_max_cycle is not None else "-", b.gcd_max_cycle if b.gcd_max_cycle is not None else "-", self.default_row_values["m_pos"], self.default_row_values["m_neg"], self.default_row_values["p_active"], self.default_row_values["k"], self.default_row_values["n_cv"], self.default_row_values["n_gcd"], self.default_row_values["v_start"], self.default_row_values["v_end"]))
         self._init_filter_lists(result)
         self._load_cache_or_keep()
         self._on_output_type_change()
@@ -630,6 +635,19 @@ class App:
     def _cache_path(self):
         return self.ctx.paths.cache_dir / "ui_cache.json"
 
+    def _drop_cache_for_root(self, root_key: str) -> None:
+        cp = self._cache_path()
+        if not cp.exists():
+            return
+        try:
+            obj = json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            cp.unlink(missing_ok=True)
+            return
+        if root_key in obj:
+            obj.pop(root_key, None)
+            cp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _load_cache_or_keep(self):
         cp = self._cache_path()
         if not cp.exists() or not self.selected_root:
@@ -658,7 +676,13 @@ class App:
         cp = self._cache_path()
         if cp.exists():
             cp.unlink()
-        messagebox.showinfo(WINDOW_TITLE, "缓存已清空")
+        if self.scan_result is not None:
+            self._fill_step2(self.scan_result)
+        self.undo_snapshot = None
+        self.error_cells.clear()
+        self.selected_cells.clear()
+        self._refresh_error_states()
+        messagebox.showinfo(WINDOW_TITLE, "缓存已清空，并恢复为扫描默认值")
 
     def _back_to_step1(self):
         self._save_cache()
@@ -699,15 +723,25 @@ class App:
         if "error" in result:
             messagebox.showerror(WINDOW_TITLE, result["error"])
             return
+        report_lines = []
+        try:
+            report_lines = Path(result["run_report_path"]).read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            report_lines = []
+        rep_failures = [x for x in report_lines if x.startswith("E") or x.startswith("文件失败:") or " 文件失败 " in x]
+        rep_warnings = [x for x in report_lines if x.startswith("W")]
+        merged = list(dict.fromkeys([*(result.get("failures", []) or []), *(result.get("warnings", []) or []), *rep_failures, *rep_warnings]))
+        skipped_file = self.ctx.paths.reports_dir / f"skipped_paths-{self.ctx.run_id}.txt"
         lines = [
             f"根目录: {self.selected_root}",
             f"极片级: {Path(result['electrode_path']).name}",
             f"电池级: {Path(result['battery_path']).name if result['battery_path'] else '(disabled)'}",
             f"运行报告: {result['run_report_path']}",
             f"日志: {result['log_path']}",
+            f"skipped_paths: {skipped_file}",
             "失败/告警(前50):",
         ]
-        for x in (result.get("failures", []) + result.get("warnings", []))[:50]:
+        for x in merged[:50]:
             lines.append(f"- {x}")
         messagebox.showinfo(WINDOW_TITLE, "\n".join(lines))
         if self.open_folder_var.get() and self.selected_root:
