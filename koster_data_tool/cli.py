@@ -9,10 +9,12 @@ from pathlib import Path
 
 from .bootstrap import init_run_context
 from .colmap import parse_file_for_cycles, read_and_map_file
+from .curve_export import export_cv_block, export_eis_block, export_gcd_block
 from .cycle_split import select_cycle_indices, split_cycles
 from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
 from .gcd_window_metrics import compute_gcd_file_metrics
 from .gui import run_gui
+from .rate_retention import build_rate_and_retention_for_battery
 from .scanner import scan_root
 
 
@@ -23,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--selftest", action="store_true", help="运行自检")
     p.add_argument("--scan-only", action="store_true", help="仅扫描并打印摘要")
     p.add_argument("--parse-one", type=str, default="", help="解析单个文件并做列映射/单位换算")
+    p.add_argument("--curve-one", type=str, default="", help="导出单个曲线数据块")
     p.add_argument("--split-one", type=str, default="", help="解析并执行分圈+选圈")
     p.add_argument("--gcd-seg-one", type=str, default="", help="单文件执行 GCD 分段")
     p.add_argument("--n-cycle", type=int, default=1, help="代表圈序号")
@@ -36,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-type", type=str, choices=["Csp", "Qsp"], default="Csp", help="输出类型")
     p.add_argument("--k-factor", type=float, default=None, help="Csp 的 K 系数")
     p.add_argument("--n-gcd", type=int, default=1, help="代表圈序号（GCD 指标）")
+    p.add_argument("--rate-selftest", action="store_true", help="打印 Step8 的 Rate/Retention 自检摘要")
     return p
 
 
@@ -176,6 +180,72 @@ def _write_sample_eis_cycle_none(path: Path) -> None:
     path.write_text("Freq,Zre,Zim\n1,2,3\n2,3,4\n3,4,5\n", encoding="utf-8")
 
 
+def _write_step8_cv(path: Path) -> None:
+    path.write_text(
+        "Time(s),Voltage(V),j(mA/cm2),Cycle\n"
+        "0,1.0,10,1\n"
+        "1,1.1,-20,1\n"
+        "2,1.2,30,1\n"
+        "3,1.3,-40,1\n",
+        encoding="utf-8",
+    )
+
+
+def _write_step8_gcd(path: Path) -> None:
+    path.write_text(
+        "Time(s),Voltage(V),Current(A),Step,Cycle\n"
+        "0,3.00,-0.2,1,1\n"
+        "1,2.90,-0.2,1,1\n"
+        "2,2.90,0.0,2,1\n"
+        "3,2.90,0.0,2,1\n"
+        "4,2.95,0.2,3,1\n"
+        "5,3.05,0.2,3,1\n"
+        "6,3.15,0.2,3,1\n"
+        "7,3.20,0.2,4,2\n"
+        "8,3.30,0.2,4,2\n"
+        "9,3.40,0.2,4,2\n"
+        "10,3.30,-0.2,5,2\n"
+        "11,3.20,-0.2,5,2\n"
+        "12,3.10,-0.2,5,2\n",
+        encoding="utf-8",
+    )
+
+
+def _write_step8_eis(path: Path) -> None:
+    path.write_text(
+        "Freq(Hz),Z'(Ohm·cm2),Z''(Ohm·cm2)\n"
+        "1,10,4\n"
+        "2,12,6\n",
+        encoding="utf-8",
+    )
+
+
+def _write_step8_rate_good(path: Path, current: float, dq_dis_end: float) -> None:
+    path.write_text(
+        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
+        f"0,2.4,0,1,1,0.00,0.00\n"
+        f"1,3.0,{current},1,1,0.28,0.00\n"
+        f"2,4.3,{current},1,1,0.57,0.00\n"
+        f"3,4.3,{-current},2,1,0.57,0.07\n"
+        f"4,3.6,{-current},2,1,0.57,0.34\n"
+        f"5,2.3,{-current},2,1,0.57,{dq_dis_end}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_step8_rate_bad(path: Path, current: float) -> None:
+    path.write_text(
+        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
+        f"0,2.4,0,1,1,0.00,0.00\n"
+        f"1,3.0,0,1,1,0.00,0.00\n"
+        f"2,4.3,0,1,1,0.00,0.00\n"
+        f"3,4.3,0,2,1,0.00,0.00\n"
+        f"4,3.6,0,2,1,0.00,0.00\n"
+        f"5,2.3,0,2,1,0.00,0.00\n",
+        encoding="utf-8",
+    )
+
+
 def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     if base_root.exists():
         shutil.rmtree(base_root)
@@ -196,6 +266,20 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_eis_cycle_none(struct_a / "EIS-10.txt")
     _write_sample_gcd_metrics(struct_a / "GCD-1.txt")
     _write_sample_gcd_capacity_only(struct_a / "GCD-4.txt")
+
+    step8_root = base_root / "step8"
+    step8_root.mkdir(parents=True, exist_ok=True)
+    _write_step8_cv(step8_root / "CV-5.txt")
+    _write_step8_gcd(step8_root / "GCD-0.5.txt")
+    _write_step8_eis(step8_root / "EIS-1.txt")
+    rate_ok = step8_root / "battery_rate_ok"
+    rate_ok.mkdir(parents=True, exist_ok=True)
+    _write_step8_rate_good(rate_ok / "GCD-0.5.txt", 0.5, 0.58)
+    _write_step8_rate_good(rate_ok / "GCD-1.txt", 1.0, 0.50)
+    rate_bad = step8_root / "battery_rate_bad"
+    rate_bad.mkdir(parents=True, exist_ok=True)
+    _write_step8_rate_bad(rate_bad / "GCD-0.5.txt", 0.5)
+    _write_step8_rate_bad(rate_bad / "GCD-1.txt", 1.0)
 
     struct_b = base_root / "structure_b_root"
     for bat in ("Battery_A", "Battery_B"):
@@ -522,6 +606,53 @@ def _selftest(ctx, logger) -> int:
     assert skipped_report.exists(), "skipped report must exist"
     assert skipped_report.read_text(encoding="utf-8").strip(), "skipped report must be non-empty"
 
+    step8_root = temp_root / "step8"
+    cv_block = export_cv_block(
+        file_path=str(step8_root / "CV-5.txt"),
+        n_cv=1,
+        a_geom_cm2=2.0,
+        m_pos_mg=10.0,
+        m_neg_mg=0.0,
+        p_active_pct=90.0,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    m_active = calc_m_active_g(10.0, 0.0, 90.0)
+    expected = [0.01 * 2.0 / m_active, -0.02 * 2.0 / m_active]
+    assert cv_block.data[1][0] > 0 and cv_block.data[1][1] < 0, "CV 导出电流应保留正负号"
+    assert abs(cv_block.data[1][0] - expected[0]) < 1e-12 and abs(cv_block.data[1][1] - expected[1]) < 1e-12, "CV 导出需按 j*A_geom/m_active"
+
+    gcd_block = export_gcd_block(str(step8_root / "GCD-0.5.txt"), 1, logger, str(ctx.report_path))
+    assert gcd_block.data[0][0] == 0.0, "GCD 导出时间需圈内归零"
+    assert len(gcd_block.data[0]) < 7, "GCD 导出应剔除静置段"
+
+    eis_block = export_eis_block(str(step8_root / "EIS-1.txt"), 2.0, logger, str(ctx.report_path))
+    assert eis_block.data[1][0] < 0, "EIS 导出第二列需为 -Z''"
+    assert abs(eis_block.data[0][0] - 5.0) < 1e-12, "EIS Ohm·cm2 需按面积换算"
+
+    rate_ok = build_rate_and_retention_for_battery(
+        gcd_files=[str(step8_root / "battery_rate_ok" / "GCD-0.5.txt"), str(step8_root / "battery_rate_ok" / "GCD-1.txt")],
+        n_gcd=1,
+        output_type="Qsp",
+        root_params={"a_geom": 1.0, "v_start": 2.5, "v_end": 4.2},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert len(rate_ok.rate.data[0]) >= 2, "Rate 需至少两个工况"
+    assert not any("W1304" in w for w in rate_ok.warnings), "正常样例不应触发 W1304"
+
+    rate_bad = build_rate_and_retention_for_battery(
+        gcd_files=[str(step8_root / "battery_rate_bad" / "GCD-0.5.txt"), str(step8_root / "battery_rate_bad" / "GCD-1.txt")],
+        n_gcd=1,
+        output_type="Qsp",
+        root_params={"a_geom": 1.0, "v_start": 2.5, "v_end": 4.2},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert any("W1304" in w for w in rate_bad.warnings), "X0<=0 应触发 W1304"
+
     logger.info("selftest: ok", structure_a=str(struct_a), structure_b=str(struct_b))
     return 0
 
@@ -584,6 +715,53 @@ def _run_gcd_metrics_one(ctx, logger, args) -> int:
     return 0
 
 
+
+def _run_curve_one(ctx, logger, args) -> int:
+    fpath = Path(args.curve_one).expanduser().resolve()
+    m = re.match(r"^(CV|GCD|EIS)-", fpath.name, re.IGNORECASE)
+    if not m:
+        raise ValueError("--curve-one 文件名必须以 CV-/GCD-/EIS- 开头")
+    ftype = m.group(1).upper()
+    if ftype == "CV":
+        block = export_cv_block(str(fpath), args.n_cycle, args.a_geom, args.m_pos, args.m_neg, args.p_active, logger, str(ctx.report_path))
+    elif ftype == "GCD":
+        block = export_gcd_block(str(fpath), args.n_cycle, logger, str(ctx.report_path))
+    else:
+        block = export_eis_block(str(fpath), args.a_geom, logger, str(ctx.report_path))
+
+    preview = []
+    rows = len(block.data[0]) if block.data else 0
+    for r in range(min(3, rows)):
+        preview.append([col[r] for col in block.data])
+    print(f"file_type={ftype}")
+    print(f"columns={block.h1}")
+    print(f"data_rows={rows}")
+    print(f"preview={preview}")
+    print(f"warnings={block.warnings}")
+    print(f"run_report_path={ctx.report_path}")
+    return 0
+
+
+def _run_rate_selftest(ctx, logger, args) -> int:
+    temp_root = ctx.paths.temp_dir / f"run_{ctx.run_id}" / "selftest_root"
+    _create_selftest_tree(temp_root)
+    bat = temp_root / "step8" / "battery_rate_ok"
+    gcd_files = sorted(str(x) for x in bat.glob("GCD-*.txt"))
+    block = build_rate_and_retention_for_battery(
+        gcd_files=gcd_files,
+        n_gcd=args.n_cycle,
+        output_type=args.output_type if args.output_type else "Csp",
+        root_params={"a_geom": args.a_geom, "v_start": args.v_start if args.v_start is not None else 2.5, "v_end": args.v_end if args.v_end is not None else 4.2, "k_factor": args.k_factor if args.k_factor is not None else 1.0},
+        battery_params={"m_pos": args.m_pos, "m_neg": args.m_neg, "p_active": args.p_active},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    print(f"rate_rows={len(block.rate.data[0]) if block.rate.data else 0}")
+    print(f"retention_rows={len(block.retention.data[0]) if block.retention.data else 0}")
+    print(f"triggered_W1304={any('W1304' in w for w in block.warnings)}")
+    print(f"run_report_path={ctx.report_path}")
+    return 0
+
 def _run_cli(args) -> int:
     ctx, logger = init_run_context()
     logger.info("mode", mode="CLI")
@@ -593,6 +771,12 @@ def _run_cli(args) -> int:
 
     if args.scan_only:
         return _run_scan_only(ctx, args.root)
+
+    if args.curve_one:
+        return _run_curve_one(ctx, logger, args)
+
+    if args.rate_selftest:
+        return _run_rate_selftest(ctx, logger, args)
 
     if args.split_one:
         return _run_split_one(ctx, logger, args.split_one, args.n_cycle, args.a_geom, args.v_start, args.v_end)
