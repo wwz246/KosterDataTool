@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 
 from .bootstrap import init_run_context
 from .colmap import parse_file_for_cycles, read_and_map_file
 from .cycle_split import select_cycle_indices, split_cycles
+from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
 from .gui import run_gui
 from .scanner import scan_root
 
@@ -21,8 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scan-only", action="store_true", help="仅扫描并打印摘要")
     p.add_argument("--parse-one", type=str, default="", help="解析单个文件并做列映射/单位换算")
     p.add_argument("--split-one", type=str, default="", help="解析并执行分圈+选圈")
+    p.add_argument("--gcd-seg-one", type=str, default="", help="单文件执行 GCD 分段")
     p.add_argument("--n-cycle", type=int, default=1, help="代表圈序号")
     p.add_argument("--a-geom", type=float, default=1.0, help="几何面积 cm^2")
+    p.add_argument("--m-pos", type=float, default=0.0, help="正极质量 mg")
+    p.add_argument("--m-neg", type=float, default=0.0, help="负极质量 mg")
+    p.add_argument("--p-active", type=float, default=100.0, help="活性物比例 %")
     p.add_argument("--v-start", type=float, default=None, help="起始电压")
     p.add_argument("--v-end", type=float, default=None, help="终止电压")
     return p
@@ -42,7 +48,21 @@ def _write_sample_cv(path: Path) -> None:
 
 def _write_sample_gcd(path: Path) -> None:
     path.write_text(
-        "Time,Voltage,Current,Cycle\n0,3.1,0.5,1\n1,3.2,0.5,3\n2,3.3,0.5,2\n3,3.4,0.5,3\n",
+        "Time,Voltage,Current,Step,Cycle\n"
+        "0,3.20,-0.5,1,1\n"
+        "1,3.10,-0.5,1,1\n"
+        "2,3.10,0.5,2,1\n"
+        "3,3.20,0.5,2,1\n"
+        "4,3.30,0.5,2,1\n"
+        "5,3.20,-0.5,3,1\n"
+        "6,3.10,-0.5,3,1\n"
+        "7,3.00,-0.5,3,1\n"
+        "8,3.00,0.5,4,2\n"
+        "9,3.10,0.5,4,2\n"
+        "10,3.20,0.5,4,2\n"
+        "11,3.10,-0.5,5,2\n"
+        "12,3.00,-0.5,5,2\n"
+        "13,2.90,-0.5,5,2\n",
         encoding="utf-8",
     )
 
@@ -197,6 +217,76 @@ def _run_split_one(ctx, logger, split_one: str, n_cycle: int, a_geom: float, v_s
     return 0
 
 
+def _run_gcd_seg_one(ctx, logger, args) -> int:
+    fpath = Path(args.gcd_seg_one).expanduser().resolve()
+    m = re.match(r"^GCD-([+-]?\d+(?:\.\d+)?)\.txt$", fpath.name, re.IGNORECASE)
+    if not m:
+        raise ValueError("--gcd-seg-one 文件名必须为 GCD-<num>.txt")
+    j_label = float(m.group(1))
+
+    _mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values = parse_file_for_cycles(
+        file_path=str(fpath),
+        file_type="GCD",
+        a_geom_cm2=args.a_geom,
+        v_start=args.v_start,
+        v_end=args.v_end,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    split_result = split_cycles("GCD", has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
+    row_indices = select_cycle_indices("GCD", split_result, args.n_cycle)
+    t = [series["t"][i] for i in row_indices]
+    E = [series["E"][i] for i in row_indices]
+    I = [series["I"][i] for i in row_indices]
+    step = [int(round(series["Step"][i])) for i in row_indices] if "Step" in series else None
+
+    m_active = calc_m_active_g(args.m_pos, args.m_neg, args.p_active)
+    cycle_seg = segment_one_cycle(t, E, I, step, args.v_start, args.v_end, j_label, m_active)
+    cycle_seg.cycle_k = args.n_cycle
+
+    all_cycles = []
+    max_cycle = split_result.max_cycle or 0
+    for k in range(1, max_cycle + 1):
+        idxs = split_result.cycles.get(k, [])
+        if not idxs:
+            continue
+        kk_t = [series["t"][i] for i in idxs]
+        kk_E = [series["E"][i] for i in idxs]
+        kk_I = [series["I"][i] for i in idxs]
+        kk_step = [int(round(series["Step"][i])) for i in idxs] if "Step" in series else None
+        seg_k = segment_one_cycle(kk_t, kk_E, kk_I, kk_step, args.v_start, args.v_end, j_label, m_active)
+        seg_k.cycle_k = k
+        all_cycles.append(seg_k)
+
+    main_order = None
+    adjusted_cycle1 = None
+    if max_cycle >= 2:
+        main_order = decide_main_order(all_cycles)
+        cycle1 = next((x for x in all_cycles if x.cycle_k == 1), None)
+        if cycle1 is not None:
+            adjusted_cycle1 = drop_first_cycle_reverse_segment(cycle1, main_order)
+
+    print(f"J_label={j_label}")
+    print(f"m_active={m_active}")
+    print(f"cycle_k={cycle_seg.cycle_k}")
+    print(f"segment_count={len(cycle_seg.segments)}")
+    for s in cycle_seg.segments:
+        print(
+            "segment="
+            f"({s.kind},{s.start},{s.end},{s.t_start},{s.t_end},{s.I_med},{s.deltaE_end})"
+        )
+    if main_order is not None:
+        print(f"main_order={main_order.order}")
+        print(f"main_order_decided_from={main_order.decided_from}")
+        print(f"main_order_warnings={main_order.warnings}")
+    if adjusted_cycle1 is not None:
+        print(f"cycle1_after_drop_segment_count={len(adjusted_cycle1.segments)}")
+        print(f"cycle1_after_drop_warnings={adjusted_cycle1.warnings}")
+    print(f"warnings={cycle_seg.warnings}")
+    print(f"run_report_path={ctx.report_path}")
+    return 0
+
+
 def _selftest(ctx, logger) -> int:
     temp_root = ctx.paths.temp_dir / f"run_{ctx.run_id}" / "selftest_root"
     struct_a, struct_b = _create_selftest_tree(temp_root)
@@ -205,7 +295,7 @@ def _selftest(ctx, logger) -> int:
     print(f"SELFTEST_ROOT={struct_b}")
 
     assert _estimate_cycle_from_file(struct_a / "CV-1.txt", "CV", logger, str(ctx.report_path)) == 4, "CV-1.txt maxCycle assertion failed"
-    assert _estimate_cycle_from_file(struct_a / "GCD-0.5.txt", "GCD", logger, str(ctx.report_path)) == 3, "GCD-1.txt maxCycle assertion failed"
+    assert _estimate_cycle_from_file(struct_a / "GCD-0.5.txt", "GCD", logger, str(ctx.report_path)) == 2, "GCD-1.txt maxCycle assertion failed"
     assert _estimate_cycle_from_file(struct_a / "GCD-2.txt", "GCD", logger, str(ctx.report_path)) == 3, "GCD-2.txt maxCycle assertion failed"
 
     cv_map, cv_series = read_and_map_file(
@@ -308,6 +398,60 @@ def _selftest(ctx, logger) -> int:
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(f"CV-10.txt split_one assertion failed: {exc}") from exc
 
+    _mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values = parse_file_for_cycles(
+        file_path=str(struct_a / "GCD-0.5.txt"),
+        file_type="GCD",
+        a_geom_cm2=1.0,
+        v_start=2.5,
+        v_end=4.2,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    split_result = split_cycles("GCD", has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
+    m_active = calc_m_active_g(10, 0, 90)
+    seg_cycles = []
+    for k in sorted(split_result.cycles):
+        idxs = split_result.cycles[k]
+        seg_k = segment_one_cycle(
+            [series["t"][i] for i in idxs],
+            [series["E"][i] for i in idxs],
+            [series["I"][i] for i in idxs],
+            [int(round(series["Step"][i])) for i in idxs],
+            2.5,
+            4.2,
+            0.5,
+            m_active,
+        )
+        seg_k.cycle_k = k
+        seg_cycles.append(seg_k)
+    order = decide_main_order(seg_cycles)
+    assert order.order == "Charge→Discharge", "main order assertion failed"
+    cycle1 = next(c for c in seg_cycles if c.cycle_k == 1)
+    after_drop = drop_first_cycle_reverse_segment(cycle1, order)
+    assert len(after_drop.segments) == len(cycle1.segments) - 1, "drop reverse segment assertion failed"
+
+    cmd = [
+        "python",
+        "main.py",
+        "--no-gui",
+        "--gcd-seg-one",
+        str(struct_a / "GCD-0.5.txt"),
+        "--m-pos",
+        "10",
+        "--m-neg",
+        "0",
+        "--p-active",
+        "90",
+        "--v-start",
+        "2.5",
+        "--v-end",
+        "4.2",
+        "--n-cycle",
+        "1",
+    ]
+    run = subprocess.run(cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    assert run.returncode == 0, f"gcd-seg-one cli assertion failed: {run.stderr}"
+
     result = scan_root(
         root_path=str(struct_b),
         program_dir=str(ctx.paths.program_dir),
@@ -356,6 +500,9 @@ def _run_cli(args) -> int:
 
     if args.split_one:
         return _run_split_one(ctx, logger, args.split_one, args.n_cycle, args.a_geom, args.v_start, args.v_end)
+
+    if args.gcd_seg_one:
+        return _run_gcd_seg_one(ctx, logger, args)
 
     if args.parse_one:
         fpath = Path(args.parse_one).expanduser().resolve()
