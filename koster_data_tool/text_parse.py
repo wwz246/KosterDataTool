@@ -34,6 +34,32 @@ def preclean_lines(raw_text: str) -> tuple[list[str], list[dict]]:
     return clean_lines, marker_events
 
 
+def preclean_indexed_lines(raw_text: str) -> tuple[list[tuple[int, str]], list[dict]]:
+    indexed_lines: list[tuple[int, str]] = []
+    marker_events: list[dict] = []
+
+    for raw_idx, raw_line in enumerate(raw_text.splitlines()):
+        line = raw_line[1:] if raw_line.startswith("\ufeff") else raw_line
+
+        if line.startswith("CSStudioFile,") or "H4sIA" in line:
+            continue
+
+        standalone_match = CYCLE_STANDALONE_RE.match(line)
+        if standalone_match:
+            marker_events.append({"rawLineIndex": raw_idx, "k": int(standalone_match.group(1)), "isStandalone": True})
+            continue
+
+        tail_match = CYCLE_TAIL_RE.search(line)
+        if tail_match:
+            marker_events.append({"rawLineIndex": raw_idx, "k": int(tail_match.group(1)), "isStandalone": False})
+            line = line[: tail_match.start()].rstrip()
+
+        if line.strip():
+            indexed_lines.append((raw_idx, line))
+
+    return indexed_lines, marker_events
+
+
 def _split_by_delimiter(line: str, delimiter: str) -> list[str]:
     if delimiter in {"\t", ",", ";"}:
         parts = line.split(delimiter)
@@ -91,6 +117,69 @@ def detect_delimiter_and_rows(lines: list[str]) -> dict:
         "modeCols": best["modeCols"],
         "kept_ratio": best["kept_ratio"],
         "kept_lines": best["kept_lines"],
+        "dropped_count": best["dropped_count"],
+    }
+
+
+def detect_delimiter_and_rows_indexed(indexed_lines: list[tuple[int, str]]) -> dict:
+    if not indexed_lines:
+        raise ValueError("delimiter detection failed: empty lines")
+
+    candidates = ["\t", ",", ";", r"\s{2,}", r"\s+"]
+    results: list[dict] = []
+
+    for idx, delimiter in enumerate(candidates):
+        if delimiter == r"\s+" and any(r["valid"] for r in results):
+            break
+
+        parsed_rows: list[list[float] | None] = []
+        num_cols: list[int] = []
+        for _raw_idx, line in indexed_lines:
+            tokens = _split_by_delimiter(line, delimiter)
+            numeric_tokens = [token for token in tokens if NUMERIC_TOKEN_RE.match(token)]
+            num_cols.append(len(numeric_tokens))
+
+            if len(tokens) == len(numeric_tokens) and numeric_tokens:
+                parsed_rows.append([float(token) for token in numeric_tokens])
+            else:
+                parsed_rows.append(None)
+
+        mode_cols, _ = Counter(num_cols).most_common(1)[0]
+        kept_rows: list[tuple[int, list[float]]] = []
+        for (raw_idx, _line), count, values in zip(indexed_lines, num_cols, parsed_rows):
+            if count == mode_cols and values is not None and len(values) == mode_cols:
+                kept_rows.append((raw_idx, values))
+
+        kept_count = len(kept_rows)
+        kept_ratio = kept_count / len(indexed_lines)
+        valid = kept_ratio >= 0.8 and mode_cols > 0
+
+        results.append(
+            {
+                "delimiter": delimiter,
+                "modeCols": mode_cols,
+                "kept_ratio": kept_ratio,
+                "kept_rows": kept_rows,
+                "dropped_count": len(indexed_lines) - kept_count,
+                "valid": valid,
+                "priority": idx,
+                "kept_count": kept_count,
+            }
+        )
+
+    valid_results = [r for r in results if r["valid"]]
+    if not valid_results:
+        raise ValueError("delimiter detection failed: no valid candidate")
+
+    best = sorted(
+        valid_results,
+        key=lambda r: (-r["kept_count"], -r["kept_ratio"], -r["modeCols"], r["priority"]),
+    )[0]
+    return {
+        "delimiter": best["delimiter"],
+        "modeCols": best["modeCols"],
+        "kept_ratio": best["kept_ratio"],
+        "kept_rows": best["kept_rows"],
         "dropped_count": best["dropped_count"],
     }
 
