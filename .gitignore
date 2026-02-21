@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+*.dylib
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+ENV/
+env/
+
+# Build
+build/
+dist/
+*.spec
+
+# Logs / runtime (generated next to exe)
+KosterData/
+
+# OS
+.DS_Store
+Thumbs.db
