@@ -247,7 +247,8 @@ def compute_one_cycle_metrics(
     k_factor: float | None,
     output_type: str,
     prefer_current_source: dict,
-    logger, run_report_path: str
+    logger, run_report_path: str,
+    file_path: str,
 ) -> GcdCycleMetrics:
     warnings: list[str] = []
     delta_v_noir = v_end - v_start
@@ -290,19 +291,22 @@ def compute_one_cycle_metrics(
         dq2 = abs(Q2[-1] - Q2[0])
         dq1_eff = math.nan if len(Q1) < 3 else abs(Q1[-1] - Q1[1])
         dq2_eff = math.nan if len(Q2) < 3 else abs(Q2[-1] - Q2[1])
-        w = "W5101:使用容量列差分计算ΔQ"
+        w = f"W5101 缺电流，已用容量列差分计算 ΔQ file_path={file_path} cycle={cycle_k}"
         warnings.append(w)
-        logger.warning(w, code="W5101", cycle_k=cycle_k)
+        logger.warning(w, code="W5101", cycle_k=cycle_k, file_path=file_path, delta_q_source="capacity")
         _append_run_report(run_report_path, w)
     else:
-        err = "E5102:缺少可用电流/容量列，无法计算ΔQ"
+        err = f"E5102 缺电流且缺容量列，ΔQ 无法计算 file_path={file_path} cycle={cycle_k}"
         warnings.append(err)
-        logger.error(err, code="E5102", cycle_k=cycle_k)
+        logger.error(err, code="E5102", cycle_k=cycle_k, file_path=file_path)
         _append_run_report(run_report_path, err)
         return GcdCycleMetrics(cycle_k, True, delta_t, delta_t_samp, None, None, None, None, None, delta_v_noir, None, None, None, None, warnings)
 
     if len(t1) < 3 or len(t2) < 3:
-        warnings.append("窗口点数不足，ΔQ_eff/ΔV_eff 为 NaN")
+        w = f"W5201 窗口点数不足，ΔQ_eff/ΔV_eff 为 NaN file_path={file_path} cycle={cycle_k}"
+        warnings.append(w)
+        logger.warning(w, code="W5201", file_path=file_path, cycle=cycle_k)
+        _append_run_report(run_report_path, w)
     dv1_eff = math.nan if len(E1) < 3 else abs(E1[-1] - E1[1])
     dv2_eff = math.nan if len(E2) < 3 else abs(E2[-1] - E2[1])
 
@@ -483,15 +487,15 @@ def compute_gcd_file_metrics(
 
         seg1_raw = _mk_seg_raw(chosen[0], desired[0])
         seg2_raw = _mk_seg_raw(chosen[1], desired[1])
-        cm = compute_one_cycle_metrics(k, seg1_raw, seg2_raw, main_order, v_start, v_end, a_geom, m_active_g, k_factor, output_type, prefer_source, logger, run_report_path)
+        cm = compute_one_cycle_metrics(k, seg1_raw, seg2_raw, main_order, v_start, v_end, a_geom, m_active_g, k_factor, output_type, prefer_source, logger, run_report_path, file_path)
         cycles[k] = cm
         if any("E5102" in w for w in cm.warnings):
-            fatal_error = "E5102:缺少可用电流/容量列，无法计算ΔQ"
+            fatal_error = f"E5102 缺电流且缺容量列，ΔQ 无法计算 file_path={file_path} n_gcd={n_gcd}"
 
     rep_ok = bool(cycles.get(n_gcd) and cycles[n_gcd].ok_window)
     if not rep_ok:
-        fatal_error = "E5201:代表圈电压窗截取失败"
-        logger.error(fatal_error, code="E5201", file=file_path)
+        fatal_error = f"E5201 选定圈无法按电压窗截取 file_path={file_path} n_gcd={n_gcd}"
+        logger.error(fatal_error, code="E5201", file_path=file_path, n_gcd=n_gcd)
         _append_run_report(run_report_path, fatal_error)
 
     return GcdConditionMetrics(file_path=file_path, j_label=j_label, main_order=main_order, n_gcd=n_gcd, representative_cycle_ok=rep_ok, cycles=cycles, fatal_error=fatal_error, warnings=file_warnings)

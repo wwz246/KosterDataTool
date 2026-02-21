@@ -25,8 +25,8 @@ def _gcd_label(path: str) -> float:
     return float(m.group(1))
 
 
-def _calc_csp(delta_q_mAh: float | None, delta_v: float, m_active_g: float, k_factor: float) -> float:
-    if delta_q_mAh is None or m_active_g <= 0 or delta_v <= 0:
+def _calc_csp(delta_q_mAh: float | None, delta_v: float | None, m_active_g: float, k_factor: float) -> float:
+    if delta_q_mAh is None or delta_v is None or m_active_g <= 0 or not math.isfinite(delta_v) or delta_v <= 0:
         return math.nan
     return (delta_q_mAh * 3.6) / (delta_v * m_active_g) * k_factor
 
@@ -54,8 +54,8 @@ def build_rate_and_retention_for_battery(
         out_cols = [[] for _ in range(5)]
         h1 = [
             "Current density",
-            "Specific capacitance",
-            "Specific capacitance",
+            "Specific capacitance (noIR)",
+            "Specific capacitance (eff)",
             "R↓",
             "R_turn",
         ]
@@ -87,12 +87,20 @@ def build_rate_and_retention_for_battery(
             if result.main_order == "Charge→Discharge":
                 dq_rep = rep.delta_q_dis
                 dq_eff_rep = rep.delta_q_eff_dis
+                dv_eff_rep = rep.delta_v_eff_dis
             else:
                 dq_rep = rep.delta_q_chg
                 dq_eff_rep = rep.delta_q_eff_chg
+                dv_eff_rep = rep.delta_v_eff_chg
+            csp_eff = _calc_csp(dq_eff_rep, dv_eff_rep, m_active_g, float(k_factor))
+            if math.isnan(csp_eff):
+                msg = f"W5202 Csp(eff) 无法计算 file={fp} cycle={n_gcd}"
+                logger.warning(msg, code="W5202", file_path=fp, cycle=n_gcd)
+                _append_run_report(run_report_path, msg)
+                warnings.append(msg)
             vals = [
                 _calc_csp(dq_rep, delta_v, m_active_g, float(k_factor)),
-                _calc_csp(dq_eff_rep, delta_v, m_active_g, float(k_factor)) if dq_eff_rep is not None else math.nan,
+                csp_eff,
                 rep.r_drop if rep.r_drop is not None else math.nan,
                 rep.r_turn if rep.r_turn is not None else math.nan,
             ]
@@ -112,11 +120,11 @@ def build_rate_and_retention_for_battery(
         x0 = col[0]
         x1 = col[-1]
         if math.isnan(x0) or x0 <= 0:
-            msg = f"W1304:保持率基准无效，列={ci}"
+            msg = "W1304 保持率基准缺失/非正"
             logger.warning(msg, code="W1304")
             _append_run_report(run_report_path, msg)
             warnings.append(msg)
-            retention_cols[ci] = [math.nan for _ in col]
+            retention_cols[ci] = ["NA" for _ in col]
         else:
             value = 100.0 * x1 / x0
             retention_cols[ci] = [value for _ in col]

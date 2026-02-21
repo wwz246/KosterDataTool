@@ -141,6 +141,25 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
         logger.info("cleanup: done", deleted_files=deleted_files, deleted_dirs=deleted_dirs, date=today.isoformat())
 
 
+
+
+def load_optional_config(paths: AppPaths, logger: Optional[DualLogger] = None) -> dict[str, str]:
+    cfg = paths.config_dir / "config.yaml"
+    out: dict[str, str] = {}
+    if not cfg.exists():
+        if logger:
+            logger.info("config: default (no config.yaml)", path=str(cfg))
+        return out
+    for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+        t = line.strip()
+        if not t or t.startswith("#") or ":" not in t:
+            continue
+        k, v = t.split(":", 1)
+        out[k.strip()] = v.strip()
+    if logger:
+        logger.info("config: loaded", path=str(cfg), keys=list(out.keys()))
+    return out
+
 def init_run_context() -> Tuple[RunContext, DualLogger]:
     program_dir = get_program_dir()
     ensure_program_dir_writable(program_dir)
@@ -158,6 +177,7 @@ def init_run_context() -> Tuple[RunContext, DualLogger]:
     logger.info("startup", run_id=run_id, program_dir=str(program_dir), mode="unknown")
 
     cleanup_if_due(paths, logger=logger)
+    _ = load_optional_config(paths, logger=logger)
 
     ctx = RunContext(
         run_id=run_id,

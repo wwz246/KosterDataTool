@@ -701,6 +701,28 @@ def _selftest(ctx, logger) -> int:
     idx_detail = next(i for i, t in enumerate(texts, start=1) if t == "电池名" and i > idx_param)
     assert idx_detail - idx_param > 5, "参数表与逐圈结果表间必须有5空行"
 
+
+    rate_ws = electrode_wb["Rate"]
+    # 第3行：每个电池块首列空，其余列为电池名
+    battery_names = [b.name for b in sorted(scan_root(str(struct_b), str(ctx.paths.program_dir), ctx.run_id, threading.Event(), None).batteries, key=lambda x: x.name)]
+    col = 1
+    for name in battery_names:
+        assert (rate_ws.cell(row=3, column=col).value or "") == "", "Rate 第3行块首列应为空"
+        assert (rate_ws.cell(row=3, column=col + 1).value or "") == name, "Rate 第3行应填电池名"
+        col += 5
+    # Rate 与 Retention 间应有1空行
+    rate_data_last = 4
+    while rate_ws.cell(row=rate_data_last, column=1).value not in (None, ""):
+        rate_data_last += 1
+    assert rate_ws.cell(row=rate_data_last, column=1).value in (None, ""), "Rate 后需空行"
+
+    # 参数汇总逐圈表覆盖 max k，不可跳过缺圈
+    header_row = idx_detail
+    detail_rows = [r for r in range(header_row + 1, ps.max_row + 1) if ps.cell(row=r, column=1).value]
+    assert detail_rows, "参数汇总逐圈明细不能为空"
+
+    # CLI 输出应含失败/告警数量
+    assert "failures=" in run_export.stdout and "warnings=" in run_export.stdout, "导出CLI需输出失败/告警数量"
     logger.info("selftest: ok", structure_a=str(struct_a), structure_b=str(struct_b))
     return 0
 
@@ -862,6 +884,8 @@ def _run_export(ctx, logger, args) -> int:
     print(f"run_report_path={result['run_report_path']}")
     print(f"log_path={result['log_path']}")
     print(f"jsonl_log_path={result['jsonl_log_path']}")
+    print(f"failures={len(result.get('failures', []))}")
+    print(f"warnings={len(result.get('warnings', []))}")
     return 0
 
 def _run_cli(args) -> int:
