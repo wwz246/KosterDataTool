@@ -83,12 +83,14 @@ def _max_cycle_from_parse_core(file_type: str, content: str, file_path: Path) ->
                 break
         return pos
 
-    marker_positions = [_pos(int(e["rawLineIndex"])) for e in marker_events if int(e.get("k", 0)) > 0]
-    marker_positions = [x for x in marker_positions if x is not None]
-    if not marker_positions:
+    valid_markers = [e for e in marker_events if int(e.get("k", 0)) > 0]
+    if not valid_markers:
         return 1
-    n_max = max(int(e["k"]) for e in marker_events if int(e.get("k", 0)) > 0)
-    has_data_after_last_marker = max(marker_positions) < (len(matrix) - 1)
+
+    n_max = max(int(e["k"]) for e in valid_markers)
+    latest_n_marker = max((e for e in valid_markers if int(e["k"]) == n_max), key=lambda e: int(e["rawLineIndex"]))
+    last_pos = _pos(int(latest_n_marker["rawLineIndex"]))
+    has_data_after_last_marker = (last_pos is None) or (last_pos < (len(matrix) - 1))
     return n_max + 1 if has_data_after_last_marker else n_max
 
 

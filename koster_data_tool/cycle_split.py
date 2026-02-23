@@ -78,12 +78,17 @@ def split_cycles(
         clamped_end_idx_by_k[k] = cur
         prev_end = cur
 
-    if not clamped_end_idx_by_k:
+    if not latest_marker_by_k:
         return CycleSplitResult(file_type=ftype, method="k_cycle", max_cycle=1, cycles={1: list(range(n_rows))}, warnings=warnings)
 
-    n_max = max(clamped_end_idx_by_k)
-    last_end = clamped_end_idx_by_k[n_max]
-    has_data_after_last_marker = last_end < n_rows - 1
+    n_max = max(latest_marker_by_k)
+    if not clamped_end_idx_by_k:
+        max_cycle = n_max + 1
+        return CycleSplitResult(file_type=ftype, method="k_cycle", max_cycle=max_cycle, cycles={k: [] for k in range(1, max_cycle + 1)}, warnings=warnings)
+
+    last_marker_raw_idx = int(latest_marker_by_k[n_max]["rawLineIndex"])
+    last_pos = _pos(last_marker_raw_idx)
+    has_data_after_last_marker = (last_pos is None) or (last_pos < n_rows - 1)
     max_cycle = n_max + 1 if has_data_after_last_marker else n_max
 
     cycles: dict[int, list[int]] = {}

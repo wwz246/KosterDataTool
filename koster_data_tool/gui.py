@@ -182,7 +182,7 @@ class App:
         tree_wrap.columnconfigure(0, weight=1)
         tree_wrap.rowconfigure(0, weight=1)
 
-        self.cell_overlay = tk.Canvas(self.param_tree, highlightthickness=0, bd=0, bg="")
+        self.cell_overlay = tk.Canvas(self.param_tree, highlightthickness=0, bd=0)
         self.cell_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         self.cell_overlay.bind("<Button-1>", self._on_cell_click)
