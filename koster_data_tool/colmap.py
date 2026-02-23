@@ -5,8 +5,9 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from .text_parse import detect_delimiter_and_rows_indexed, preclean_indexed_lines
-from .run_report import report_error, report_warning
+from .fixed_tab_reader import read_fixed_tab_table, tokens_to_float_matrix
+from .run_report import report_error
+from .text_parse import extract_k_cycle_markers
 
 
 @dataclass
@@ -31,48 +32,16 @@ def normalize_header_token(s: str) -> tuple[str, str]:
     return name_norm, unit_raw
 
 
-def find_header_row(raw_lines: list[str]) -> int | None:
-    for idx, line in enumerate(raw_lines):
-        hit = 0
-        lower = unicodedata.normalize("NFKC", line).lower()
-        if re.search(r"time|时间|\bt\b", lower):
-            hit += 1
-        if re.search(r"voltage|电压|\be\b|potential", lower):
-            hit += 1
-        if re.search(r"current\s*density|电流密度|\bj\b", lower):
-            hit += 1
-        if re.search(r"current|电流|\bi\b", lower):
-            hit += 1
-        if re.search(r"step|工步", lower):
-            hit += 1
-        if re.search(r"cycle", lower):
-            hit += 1
-        if "z'" in lower or "zre" in lower:
-            hit += 1
-        if "z''" in lower or "zim" in lower:
-            hit += 1
-        if hit >= 2:
-            return idx
-    return None
-
-
-def _split(line: str, delimiter: str) -> list[str]:
-    if delimiter in {"\t", ",", ";"}:
-        return [t.strip() for t in line.split(delimiter)]
-    return [t.strip() for t in re.split(delimiter, line)]
-
-
 def _is_density_unit(unit: str) -> bool:
     u = unicodedata.normalize("NFKC", unit).lower().replace("²", "2")
     return "/cm2" in u or "/cm^2" in u or "/mm2" in u or "/m2" in u
 
 
-def map_columns_from_header(file_type: str, header_line: str, delimiter: str) -> tuple[dict[str, int], dict[str, str]]:
+def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], dict[str, str]]:
     col_index: dict[str, int] = {}
     unit: dict[str, str] = {}
 
-    tokens = _split(header_line, delimiter)
-    for i, token in enumerate(tokens):
+    for i, token in enumerate(header_tokens):
         name_norm, unit_raw = normalize_header_token(token)
         nn = name_norm.lower()
         if not nn:
@@ -108,79 +77,6 @@ def map_columns_from_header(file_type: str, header_line: str, delimiter: str) ->
     return col_index, unit
 
 
-def _is_mostly_monotonic(col: list[float]) -> bool:
-    if len(col) < 3:
-        return True
-    bad = sum(1 for a, b in zip(col, col[1:]) if b < a - 1e-12)
-    return bad / (len(col) - 1) <= 0.05
-
-
-def infer_columns_no_header(file_type: str, data_cols: list[list[float]], v_start: float | None, v_end: float | None) -> tuple[dict[str, int], list[str]]:
-    col_index: dict[str, int] = {}
-    warnings: list[str] = []
-
-    if not data_cols:
-        return col_index, ["W6102:no numeric columns"]
-
-    spans = [(max(c) - min(c)) if c else 0.0 for c in data_cols]
-    mono_candidates = [i for i, c in enumerate(data_cols) if _is_mostly_monotonic(c)]
-    if mono_candidates:
-        t_idx = max(mono_candidates, key=lambda i: spans[i])
-        col_index["t"] = t_idx
-        warnings.append(f"W6102:infer t->col#{t_idx} by monotonic+max-span")
-
-    vlo = (v_start - 1.0) if v_start is not None else 0.0
-    vhi = (v_end + 1.0) if v_end is not None else 5.0
-    v_candidates = []
-    for i, c in enumerate(data_cols):
-        if not c:
-            continue
-        ratio = sum(1 for x in c if vlo <= x <= vhi) / len(c)
-        v_candidates.append((ratio, -abs((sum(c) / len(c)) - (vlo + vhi) / 2), i))
-    if v_candidates:
-        e_idx = sorted(v_candidates, reverse=True)[0][2]
-        if sorted(v_candidates, reverse=True)[0][0] >= 0.8:
-            col_index["E"] = e_idx
-            warnings.append(f"W6102:infer E->col#{e_idx} by voltage window [{vlo},{vhi}]")
-
-    for i, c in enumerate(data_cols):
-        if i in col_index.values() or not c:
-            continue
-        med = sorted(c)[len(c) // 2]
-        mad = sorted(abs(x - med) for x in c)[len(c) // 2]
-        if mad <= max(1e-6, abs(med) * 0.1):
-            col_index["I"] = i
-            warnings.append(f"W6102:infer I->col#{i} by quasi-constant segments")
-            break
-
-    discrete = []
-    for i, c in enumerate(data_cols):
-        if i in col_index.values() or not c:
-            continue
-        if all(abs(x - round(x)) < 1e-6 for x in c):
-            vals = [int(round(x)) for x in c]
-            uniq = len(set(vals))
-            if uniq <= max(20, len(vals) // 5):
-                discrete.append((i, vals))
-    if discrete:
-        step_i, step_vals = discrete[0]
-        col_index["Step"] = step_i
-        warnings.append(f"W6102:infer Step->col#{step_i} by discrete piecewise-constant integers")
-        for i, vals in discrete[1:]:
-            if min(vals) <= 1 and max(vals) > 1:
-                col_index["Cycle"] = i
-                warnings.append(f"W6102:infer Cycle->col#{i} by repeating ascending integer pattern")
-                break
-
-    if file_type == "EIS":
-        if len(data_cols) != 2:
-            return {}, ["E6101:no-header EIS mapping is unstable (need exactly 2 columns for Zre/Zim)"]
-        col_index = {"Zre": 0, "Zim": 1}
-        warnings.append("W6102:infer EIS no-header by 2-column fallback Zre/Zim")
-
-    return col_index, warnings
-
-
 def _norm_unit(u: str) -> str:
     return unicodedata.normalize("NFKC", u or "").strip().lower().replace("ω", "ohm").replace("Ω", "ohm").replace("²", "2")
 
@@ -202,7 +98,6 @@ def convert_units(col_index: dict[str, int], unit_raw: dict[str, str], data_cols
 
     for key, idx in col_index.items():
         if idx >= len(data_cols):
-            warnings.append(f"W6201:column out of range for {key}")
             continue
         vals = list(data_cols[idx])
         u_raw = unit_raw.get(key, "")
@@ -250,8 +145,6 @@ def convert_units(col_index: dict[str, int], unit_raw: dict[str, str], data_cols
             series[key] = out
             unit_norm[key] = "mAh"
         elif key in {"Zre", "Zim"}:
-            if "ohm" not in u and u:
-                warnings.append(f"W6202:unrecognized impedance unit for {key}: {u_raw}")
             if "cm2" in u or "cm^2" in u or "mm2" in u or "m2" in u:
                 area_factor = _area_unit_to_cm2(u)
                 vals = [v * area_factor / a_geom_cm2 for v in vals]
@@ -273,8 +166,6 @@ def _append_run_report(run_report_path: str, text: str) -> None:
         f.write(text + "\n")
 
 
-
-
 def _extract_cycle_values(series: dict[str, list[float]]) -> tuple[bool, list[int] | None]:
     if "Cycle" not in series:
         return False, None
@@ -286,75 +177,80 @@ def _extract_cycle_values(series: dict[str, list[float]]) -> tuple[bool, list[in
     return True, vals
 
 
-def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str,list[float]], list[int], list[dict], bool, list[int] | None]:
-    raw_text = None
-    for enc in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
-        try:
-            raw_text = Path(file_path).read_text(encoding=enc)
-            break
-        except Exception:
-            continue
-    if raw_text is None:
-        err = f"E6001 文件读取失败（编码不支持） file={file_path}"
-        line = report_error(run_report_path, "E6001", "文件读取失败（编码不支持）", file=file_path)
-        logger.error(line, code="E6001", file_path=file_path)
-        raise ValueError(err)
-    raw_lines = raw_text.splitlines()
-    indexed_lines, marker_events = preclean_indexed_lines(raw_text)
+def _raise_with_report(code: str, message: str, file_path: str, logger, run_report_path: str) -> None:
+    line = report_error(run_report_path, code, message, file=file_path)
+    logger.error(line, code=code, file_path=file_path)
+    raise ValueError(message)
+
+
+def _enforce_required_columns(file_type: str, col_index: dict[str, int], file_path: str, logger, run_report_path: str) -> None:
+    ftype = file_type.upper()
+    if ftype == "CV":
+        missing: list[str] = []
+        if "t" not in col_index:
+            missing.append("Time")
+        if "E" not in col_index:
+            missing.append("Voltage")
+        if "I" not in col_index and "j" not in col_index:
+            missing.append("Current|Current density")
+        if missing:
+            _raise_with_report("E9006", f"E9006: missing required columns for CV missing={','.join(missing)} file={file_path}", file_path, logger, run_report_path)
+    elif ftype == "GCD":
+        missing: list[str] = []
+        if "t" not in col_index:
+            missing.append("Time")
+        if "E" not in col_index:
+            missing.append("Voltage")
+        if "Cycle" not in col_index:
+            missing.append("Cycle")
+        if missing:
+            _raise_with_report("E9007", f"E9007: missing required columns for GCD missing={','.join(missing)} file={file_path}", file_path, logger, run_report_path)
+    elif ftype == "EIS":
+        if "Zre" not in col_index or "Zim" not in col_index:
+            _raise_with_report("E9008", f"E9008: missing required columns for EIS missing=Z'|Z'' file={file_path}", file_path, logger, run_report_path)
+
+
+def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str, list[float]], list[int], list[dict], bool, list[int] | None]:
+    del v_start, v_end
     try:
-        detection = detect_delimiter_and_rows_indexed(indexed_lines)
-    except ValueError:
-        trimmed = indexed_lines[1:] if len(indexed_lines) > 1 else indexed_lines
-        detection = detect_delimiter_and_rows_indexed(trimmed)
+        raw_text = Path(file_path).read_text(encoding="utf-8")
+    except Exception as exc:
+        _raise_with_report("E6001", f"E6001 文件读取失败（UTF-8） file={file_path}", file_path, logger, run_report_path)
+        raise exc
 
-    warnings: list[str] = []
-    if detection["dropped_count"] > 0:
-        line = report_warning(run_report_path, "W6101", "丢弃非众数列行", count=detection["dropped_count"], file=file_path)
-        warnings.append(line)
-        logger.warning(line, code="W6101", file=file_path, dropped_count=detection["dropped_count"])
+    marker_events = extract_k_cycle_markers(raw_text)
+    try:
+        header, rows_tokens = read_fixed_tab_table(file_path)
+    except ValueError as exc:
+        msg = str(exc)
+        code = msg.split(":", 1)[0] if msg.startswith("E") else "E9004"
+        _raise_with_report(code, msg, file_path, logger, run_report_path)
 
-    kept_rows = detection["kept_rows"]
-    kept_raw_line_indices = [raw_idx for raw_idx, _ in kept_rows]
-    data_matrix = [row for _, row in kept_rows]
+    try:
+        data_matrix = tokens_to_float_matrix(header, rows_tokens, file_path=file_path)
+    except ValueError as exc:
+        _raise_with_report("E9005", str(exc), file_path, logger, run_report_path)
+
+    col_index, unit_raw = map_columns_from_header(header)
+    _enforce_required_columns(file_type, col_index, file_path, logger, run_report_path)
+
     data_cols = [] if not data_matrix else [[row[i] for row in data_matrix] for i in range(len(data_matrix[0]))]
-
-    header_idx = find_header_row(raw_lines)
-    no_header = header_idx is None
-    if header_idx is not None:
-        col_index, unit_raw = map_columns_from_header(file_type, raw_lines[header_idx], detection["delimiter"])
-    else:
-        unit_raw = {}
-        col_index, infer_warnings = infer_columns_no_header(file_type, data_cols, v_start, v_end)
-        warnings.extend(infer_warnings)
-        logger.info("no-header inference reasons", file=file_path, reasons=infer_warnings)
-        if any(w.startswith("E6101") for w in infer_warnings):
-            err = next(w for w in infer_warnings if w.startswith("E6101"))
-            line = report_error(run_report_path, "E6101", err, file=file_path)
-            logger.error(line, code="E6101", file=file_path)
-            raise ValueError(err)
-
     unit_norm, series, convert_warnings = convert_units(col_index, unit_raw, data_cols, a_geom_cm2)
-    warnings.extend(convert_warnings)
-
-    mapping_desc = ", ".join(f"col#{v}->{k}" for k, v in sorted(col_index.items(), key=lambda kv: kv[1]))
-    if no_header:
-        logger.info("no-header mapping", file=file_path, mapping=mapping_desc)
-    else:
-        logger.info("header mapping", file=file_path, mapping=mapping_desc)
-    logger.info("column mapping detail", file=file_path, no_header=no_header, warnings=warnings)
+    kept_raw_line_indices = [j + 3 for j in range(len(data_matrix))]
 
     mapping = ColumnMapping(
-        file_type=file_type,
-        delimiter=detection["delimiter"],
-        modeCols=detection["modeCols"],
-        kept_ratio=detection["kept_ratio"],
-        no_header=no_header,
+        file_type=file_type.upper(),
+        delimiter="\\t",
+        modeCols=len(header),
+        kept_ratio=1.0,
+        no_header=False,
         col_index=col_index,
         unit=unit_norm,
-        warnings=warnings,
+        warnings=list(convert_warnings),
     )
     has_cycle_col, cycle_values = _extract_cycle_values(series)
     return mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values
+
 
 def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str, list[float]]]:
     mapping, series, _kept_raw_line_indices, _marker_events, _has_cycle_col, _cycle_values = parse_file_for_cycles(
@@ -367,18 +263,3 @@ def read_and_map_file(file_path: str, file_type: str, a_geom_cm2: float, v_start
         run_report_path=run_report_path,
     )
     return mapping, series
-
-
-def _to_data_cols(lines: list[str], delimiter: str, mode_cols: int) -> list[list[float]]:
-    rows: list[list[float]] = []
-    for line in lines:
-        tokens = _split(line, delimiter)
-        if len(tokens) != mode_cols:
-            continue
-        try:
-            rows.append([float(t) for t in tokens])
-        except ValueError:
-            continue
-    if not rows:
-        return []
-    return [[row[i] for row in rows] for i in range(len(rows[0]))]

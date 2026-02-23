@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .text_parse import detect_delimiter_and_rows, estimate_max_cycle, preclean_lines
+from .fixed_tab_reader import read_fixed_tab_table, tokens_to_float_matrix
+from .text_parse import extract_k_cycle_markers
 
 
 FILE_RE = re.compile(r"^(CV|GCD|EIS)-([+-]?(?:\d+(?:\.\d*)?|\.\d+))\.txt$", re.IGNORECASE)
@@ -45,71 +46,50 @@ class ScanResult:
     skipped_report_path: str
 
 
-def _split_for_delimiter(line: str, delimiter: str) -> list[str]:
-    if delimiter in {"\t", ",", ";"}:
-        parts = line.split(delimiter)
-    else:
-        parts = re.split(delimiter, line)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _max_cycle_from_parse_core(file_type: str, content: str) -> Optional[int]:
-    clean_lines, marker_events = preclean_lines(content)
-    if not clean_lines and not marker_events:
+def _max_cycle_from_parse_core(file_type: str, content: str, file_path: Path) -> Optional[int]:
+    marker_events = extract_k_cycle_markers(content)
+    try:
+        header, rows_tokens = read_fixed_tab_table(str(file_path))
+        matrix = tokens_to_float_matrix(header, rows_tokens, file_path=str(file_path))
+    except Exception:
         return None
 
-    detection = None
-    try:
-        detection = detect_delimiter_and_rows(clean_lines)
-    except ValueError:
-        if len(clean_lines) > 1:
-            try:
-                detection = detect_delimiter_and_rows(clean_lines[1:])
-            except ValueError:
-                pass
+    if not matrix:
+        return None
 
-    kept_lines = detection["kept_lines"] if detection else []
-    delimiter = detection["delimiter"] if detection else "	"
+    if file_type == "GCD":
+        try:
+            cycle_idx = next(i for i, h in enumerate(header) if "cycle" in h.lower())
+        except StopIteration:
+            return None
+        cycle_values: list[int] = []
+        for row in matrix:
+            v = row[cycle_idx]
+            if abs(v - round(v)) > 1e-6:
+                return None
+            cycle_values.append(int(round(v)))
+        return max(cycle_values) if cycle_values else None
 
-    cycle_values: list[int] = []
-    has_cycle_col = False
-    cycle_idx: Optional[int] = None
-    if file_type == "GCD" and clean_lines:
-        for line in clean_lines:
-            tokens = _split_for_delimiter(line, delimiter)
-            if not tokens:
-                continue
-            if cycle_idx is None:
-                cycle_idx = next((i for i, tk in enumerate(tokens) if tk.lower() == "cycle"), None)
-                if cycle_idx is None:
-                    continue
-                has_cycle_col = True
-                continue
-            if cycle_idx < len(tokens):
-                value = tokens[cycle_idx]
-                if re.match(r"^[+-]?\d+$", value):
-                    cycle_values.append(int(value))
+    kept_raw_line_indices = [j + 3 for j in range(len(matrix))]
+    if not marker_events:
+        return 1
 
-    marker_indices = [event["rawLineIndex"] for event in marker_events]
-    last_marker_index = max(marker_indices) if marker_indices else None
-    has_data_after_last_marker = False
-    if last_marker_index is not None:
-        kept_set = set(kept_lines)
-        for raw_idx, raw_line in enumerate(content.splitlines()):
-            if raw_idx <= last_marker_index:
-                continue
-            normalized = raw_line[1:] if raw_line.startswith("\ufeff") else raw_line
-            if normalized in kept_set:
-                has_data_after_last_marker = True
+    def _pos(raw_line_index: int) -> int | None:
+        pos = None
+        for idx, ridx in enumerate(kept_raw_line_indices):
+            if ridx <= raw_line_index:
+                pos = idx
+            else:
                 break
+        return pos
 
-    return estimate_max_cycle(
-        file_type=file_type,
-        has_cycle_col=has_cycle_col,
-        cycle_values=cycle_values if has_cycle_col else None,
-        marker_events=marker_events,
-        has_data_after_last_marker=has_data_after_last_marker,
-    )
+    marker_positions = [_pos(int(e["rawLineIndex"])) for e in marker_events if int(e.get("k", 0)) > 0]
+    marker_positions = [x for x in marker_positions if x is not None]
+    if not marker_positions:
+        return 1
+    n_max = max(int(e["k"]) for e in marker_events if int(e.get("k", 0)) > 0)
+    has_data_after_last_marker = max(marker_positions) < (len(matrix) - 1)
+    return n_max + 1 if has_data_after_last_marker else n_max
 
 
 def _detect_file(file_name: str, abs_path: Path) -> Optional[RecognizedFile]:
@@ -202,7 +182,7 @@ def scan_root(
             if cancel_flag and cancel_flag.is_set():
                 break
             txt = _safe_read_text(Path(file_obj.path))
-            mc = _max_cycle_from_parse_core("CV", txt) if txt is not None else None
+            mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
             if mc is not None:
                 cv_cycles.append(mc)
         for file_obj in gcd_files:
@@ -211,7 +191,7 @@ def scan_root(
             txt = _safe_read_text(Path(file_obj.path))
             if txt is None:
                 continue
-            mc = _max_cycle_from_parse_core("GCD", txt)
+            mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
             if mc is not None:
                 gcd_cycles.append(mc)
 
@@ -252,7 +232,7 @@ def scan_root(
                 if cancel_flag and cancel_flag.is_set():
                     break
                 txt = _safe_read_text(Path(file_obj.path))
-                mc = _max_cycle_from_parse_core("CV", txt) if txt is not None else None
+                mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
                 if mc is not None:
                     cv_cycles.append(mc)
             for file_obj in gcd_files:
@@ -261,7 +241,7 @@ def scan_root(
                 txt = _safe_read_text(Path(file_obj.path))
                 if txt is None:
                     continue
-                mc = _max_cycle_from_parse_core("GCD", txt)
+                mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
                 if mc is not None:
                     gcd_cycles.append(mc)
 
