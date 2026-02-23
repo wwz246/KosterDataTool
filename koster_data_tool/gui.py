@@ -50,9 +50,14 @@ class App:
         self._blink_job = None
         self._blink_on = False
         self.param_columns = ["name", "cvmax", "gcdmax", "m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
-        self.editable_columns = {3, 4, 5, 6, 7, 8, 9, 10}
+        self.editable_column_keys = ["m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
+        self.editable_actual_indices = {self.param_columns.index(key) for key in self.editable_column_keys}
         self.selected_cells: set[tuple[str, int]] = set()
+        self.anchor_cell: tuple[str, int] | None = None
         self.drag_start_cell: tuple[str, int] | None = None
+        self.drag_started = False
+        self.drag_start_xy = (0, 0)
+        self.drag_threshold = 6
         self.error_cells: dict[tuple[str, int], str] = {}
         self.undo_snapshot: dict[tuple[str, int], str] | None = None
         self.tooltip: tk.Toplevel | None = None
@@ -180,17 +185,18 @@ class App:
         self.cell_overlay = tk.Canvas(self.param_tree, highlightthickness=0, bd=0, bg="")
         self.cell_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        self.param_tree.bind("<Double-1>", self._edit_param_cell)
-        self.cell_overlay.bind("<Double-1>", self._edit_param_cell)
-        self.cell_overlay.bind("<Button-1>", self._on_tree_click)
-        self.cell_overlay.bind("<Shift-Button-1>", self._on_tree_shift_click)
-        self.cell_overlay.bind("<B1-Motion>", self._on_tree_drag)
-        self.cell_overlay.bind("<Motion>", self._on_tree_hover)
+        self.cell_overlay.bind("<Button-1>", self._on_cell_click)
+        self.cell_overlay.bind("<Control-Button-1>", self._on_cell_ctrl_click)
+        self.cell_overlay.bind("<Shift-Button-1>", self._on_cell_shift_click)
+        self.cell_overlay.bind("<B1-Motion>", self._on_cell_drag)
+        self.cell_overlay.bind("<ButtonRelease-1>", self._on_cell_release)
+        self.cell_overlay.bind("<Double-Button-1>", self._on_cell_double_click)
+        self.cell_overlay.bind("<Motion>", self._on_cell_hover)
         self.cell_overlay.bind("<Leave>", lambda _e: self._hide_tooltip())
         self.param_tree.bind("<Control-c>", self._copy_selection)
         self.param_tree.bind("<Control-v>", self._paste_multi_value)
         self.param_tree.bind("<Control-z>", self._undo_last_edit)
-        self.param_tree.bind("<Configure>", lambda _e: self._redraw_cell_overlay())
+        self.param_tree.bind("<Configure>", lambda _e: self._redraw_selection_overlay())
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
@@ -234,21 +240,21 @@ class App:
 
     def _param_tree_yview(self, *args) -> None:
         self.param_tree.yview(*args)
-        self._redraw_cell_overlay()
+        self._redraw_selection_overlay()
 
     def _param_tree_xview(self, *args) -> None:
         self.param_tree.xview(*args)
-        self._redraw_cell_overlay()
+        self._redraw_selection_overlay()
 
     def _on_tree_yscroll(self, first, last) -> None:
         if self.param_y_scroll is not None:
             self.param_y_scroll.set(first, last)
-        self._redraw_cell_overlay()
+        self._redraw_selection_overlay()
 
     def _on_tree_xscroll(self, first, last) -> None:
         if self.param_x_scroll is not None:
             self.param_x_scroll.set(first, last)
-        self._redraw_cell_overlay()
+        self._redraw_selection_overlay()
 
     def _load_default_open_dir(self) -> None:
         last_root = read_last_root(self.ctx.paths.state_dir)
@@ -361,6 +367,9 @@ class App:
     def _fill_step2(self, result: ScanResult):
         self.param_tree.delete(*self.param_tree.get_children())
         self.selected_cells.clear()
+        self.anchor_cell = None
+        self.drag_start_cell = None
+        self.drag_started = False
         self.error_cells.clear()
         for b in sorted(result.batteries, key=lambda x: x.name):
             self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle if b.cv_max_cycle is not None else "-", b.gcd_max_cycle if b.gcd_max_cycle is not None else "-", self.default_row_values["m_pos"], self.default_row_values["m_neg"], self.default_row_values["p_active"], self.default_row_values["k"], self.default_row_values["n_cv"], self.default_row_values["n_gcd"], self.default_row_values["v_start"], self.default_row_values["v_end"]))
@@ -395,102 +404,172 @@ class App:
         if self.eis_list.size() > 0:
             self.eis_list.select_set(self.eis_list.size() - 1)
 
-    def _get_display_cols(self) -> list[str]:
+    def _get_display_col_keys(self) -> list[str]:
         display_cols = self.param_tree.cget("displaycolumns")
+        if display_cols in ("", (), []):
+            return list(self.param_tree.cget("columns"))
         if display_cols in ("#all", ("#all",), ["#all"]):
-            return list(self.param_columns)
+            return list(self.param_tree.cget("columns"))
         return list(display_cols)
 
-    def _event_to_actual_cell(self, event) -> tuple[str, int] | None:
-        iid = self.param_tree.identify_row(event.y)
-        display_col = self.param_tree.identify_column(event.x)
-        if not iid or not display_col:
-            return None
-        display_cols = self._get_display_cols()
-        display_idx = int(display_col[1:]) - 1
-        if display_idx < 0 or display_idx >= len(display_cols):
-            return None
-        col_key = display_cols[display_idx]
-        if col_key not in self.param_columns:
-            return None
-        return iid, self.param_columns.index(col_key)
+    def _col_key_to_actual_index(self, col_key: str) -> int:
+        return self.param_columns.index(col_key)
 
-    def _actual_col_to_display_col_id(self, actual_idx: int) -> str | None:
+    def _actual_index_to_display_col_id(self, actual_idx: int) -> str | None:
         if actual_idx < 0 or actual_idx >= len(self.param_columns):
             return None
+        display_col_keys = self._get_display_col_keys()
         col_key = self.param_columns[actual_idx]
-        display_cols = self._get_display_cols()
-        if col_key not in display_cols:
+        if col_key not in display_col_keys:
             return None
-        return f"#{display_cols.index(col_key) + 1}"
+        return f"#{display_col_keys.index(col_key) + 1}"
 
-    def _redraw_cell_overlay(self) -> None:
+    def _event_to_cell(self, event) -> tuple[str, int] | None:
+        iid = self.param_tree.identify_row(event.y)
+        display_col_id = self.param_tree.identify_column(event.x)
+        if not iid or not display_col_id:
+            return None
+        if display_col_id == "#0":
+            return None
+        display_col_keys = self._get_display_col_keys()
+        try:
+            display_idx = int(display_col_id[1:]) - 1
+        except (TypeError, ValueError):
+            return None
+        if display_idx < 0 or display_idx >= len(display_col_keys):
+            return None
+        return iid, self._col_key_to_actual_index(display_col_keys[display_idx])
+
+    def _row_index(self, iid: str) -> int:
+        children = list(self.param_tree.get_children(""))
+        return children.index(iid)
+
+    def _iid_from_row_index(self, idx: int) -> str:
+        children = list(self.param_tree.get_children(""))
+        return children[idx]
+
+    def _redraw_selection_overlay(self) -> None:
         if self.cell_overlay is None:
             return
-        self.cell_overlay.delete("all")
-        for iid, actual_col in sorted(self.selected_cells):
-            display_col_id = self._actual_col_to_display_col_id(actual_col)
-            if display_col_id is None:
+        self.cell_overlay.delete("sel")
+        for iid, actual_idx in sorted(self.selected_cells):
+            display_id = self._actual_index_to_display_col_id(actual_idx)
+            if display_id is None:
                 continue
-            bbox = self.param_tree.bbox(iid, display_col_id)
+            bbox = self.param_tree.bbox(iid, display_id)
             if not bbox:
                 continue
             x, y, w, h = bbox
-            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#0078d7", width=2)
-        for (iid, actual_col), _msg in self.error_cells.items():
-            display_col_id = self._actual_col_to_display_col_id(actual_col)
-            if display_col_id is None:
+            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#0078d7", width=2, tags=("sel",))
+        self.cell_overlay.delete("err")
+        for (iid, actual_idx), _msg in self.error_cells.items():
+            display_id = self._actual_index_to_display_col_id(actual_idx)
+            if display_id is None:
                 continue
-            bbox = self.param_tree.bbox(iid, display_col_id)
+            bbox = self.param_tree.bbox(iid, display_id)
             if not bbox:
                 continue
             x, y, w, h = bbox
-            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#d40000", width=2)
+            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#d40000", width=2, tags=("err",))
 
-    def _select_rectangle(self, start: tuple[str, int], end: tuple[str, int]) -> None:
-        rows = list(self.param_tree.get_children())
-        s_row, s_col = start
-        e_row, e_col = end
-        if s_row not in rows or e_row not in rows:
-            return
-        rs, re = sorted([rows.index(s_row), rows.index(e_row)])
-        cs, ce = sorted([s_col, e_col])
-        self.selected_cells = {(rows[r], c) for r in range(rs, re + 1) for c in range(cs, ce + 1)}
-        self.param_tree.selection_set(rows[rs: re + 1])
-        self._redraw_cell_overlay()
+    def _select_rect_cells(self, start: tuple[str, int], end: tuple[str, int]) -> None:
+        s_iid, s_col = start
+        e_iid, e_col = end
+        r0 = self._row_index(s_iid)
+        r1 = self._row_index(e_iid)
+        r_lo, r_hi = min(r0, r1), max(r0, r1)
+        c_lo, c_hi = min(s_col, e_col), max(s_col, e_col)
+        self.selected_cells.clear()
+        for row_idx in range(r_lo, r_hi + 1):
+            iid = self._iid_from_row_index(row_idx)
+            for actual_idx in range(c_lo, c_hi + 1):
+                if actual_idx in self.editable_actual_indices:
+                    self.selected_cells.add((iid, actual_idx))
 
-    def _on_tree_click(self, event):
+    def _on_cell_click(self, event):
         self.param_tree.focus_set()
-        cell = self._event_to_actual_cell(event)
-        if not cell:
+        cell = self._event_to_cell(event)
+        if cell is None:
             return "break"
+        self.selected_cells.clear()
+        if cell[1] in self.editable_actual_indices:
+            self.selected_cells.add(cell)
+        self.anchor_cell = cell
         self.drag_start_cell = cell
-        self.selected_cells = {cell}
-        self._redraw_cell_overlay()
+        self.drag_start_xy = (event.x, event.y)
+        self.drag_started = False
+        self._redraw_selection_overlay()
         return "break"
 
-    def _on_tree_shift_click(self, event):
+    def _on_cell_ctrl_click(self, event):
         self.param_tree.focus_set()
-        cell = self._event_to_actual_cell(event)
-        if not cell:
+        cell = self._event_to_cell(event)
+        if cell is None:
             return "break"
-        anchor = self.drag_start_cell or cell
-        self._select_rectangle(anchor, cell)
+        if cell[1] not in self.editable_actual_indices:
+            return "break"
+        if cell in self.selected_cells:
+            self.selected_cells.remove(cell)
+        else:
+            self.selected_cells.add(cell)
+        self._redraw_selection_overlay()
         return "break"
 
-    def _on_tree_drag(self, event):
+    def _on_cell_shift_click(self, event):
         self.param_tree.focus_set()
-        if not self.drag_start_cell:
+        cell = self._event_to_cell(event)
+        if cell is None:
             return "break"
-        cell = self._event_to_actual_cell(event)
-        if not cell:
-            return "break"
-        self._select_rectangle(self.drag_start_cell, cell)
+        if self.anchor_cell is None:
+            return self._on_cell_click(event)
+        self._select_rect_cells(self.anchor_cell, cell)
+        self.drag_start_cell = self.anchor_cell
+        self.drag_start_xy = (event.x, event.y)
+        self.drag_started = False
+        self._redraw_selection_overlay()
         return "break"
 
-    def _on_tree_hover(self, event):
+    def _on_cell_drag(self, event):
         self.param_tree.focus_set()
-        cell = self._event_to_actual_cell(event)
+        if self.drag_start_cell is None:
+            return "break"
+        x0, y0 = self.drag_start_xy
+        if abs(event.x - x0) + abs(event.y - y0) < self.drag_threshold:
+            return "break"
+        self.drag_started = True
+        current_cell = self._event_to_cell(event)
+        if current_cell is None:
+            return "break"
+        self._select_rect_cells(self.drag_start_cell, current_cell)
+        self._redraw_selection_overlay()
+        return "break"
+
+    def _on_cell_release(self, _event):
+        self.param_tree.focus_set()
+        self.drag_start_cell = None
+        self.drag_started = False
+        return "break"
+
+    def _on_cell_double_click(self, event):
+        self.param_tree.focus_set()
+        cell = self._event_to_cell(event)
+        if cell is None:
+            return "break"
+        iid, actual_idx = cell
+        if actual_idx not in self.editable_actual_indices:
+            return "break"
+        if actual_idx == 6 and self.output_type_var.get() == "Qsp":
+            return "break"
+        self.selected_cells.clear()
+        self.selected_cells.add(cell)
+        self.anchor_cell = cell
+        self._redraw_selection_overlay()
+        self._open_cell_editor(iid, actual_idx)
+        return "break"
+
+    def _on_cell_hover(self, event):
+        self.param_tree.focus_set()
+        cell = self._event_to_cell(event)
         if not cell or cell not in self.error_cells:
             self._hide_tooltip()
             return
@@ -543,7 +622,7 @@ class App:
 
     def _fill_single_value(self):
         value = self.param_fill_var.get()
-        targets = {(iid, c) for iid, c in self.selected_cells if c in self.editable_columns and not (c == 6 and self.output_type_var.get() == "Qsp")}
+        targets = {(iid, c) for iid, c in self.selected_cells if c in self.editable_actual_indices and not (c == 6 and self.output_type_var.get() == "Qsp")}
         updates = {k: value for k in targets}
         self._apply_cell_updates(updates)
 
@@ -561,11 +640,11 @@ class App:
         if not rows:
             return "break"
         if self.selected_cells:
-            start_row_idx = min(rows.index(iid) for iid, _c in self.selected_cells if iid in rows)
-            editable_selected_cols = sorted(c for _iid, c in self.selected_cells if c in self.editable_columns)
-            start_col = editable_selected_cols[0] if editable_selected_cols else 3
+            start_row_idx = min(self._row_index(iid) for iid, _c in self.selected_cells)
+            start_col = min(actual_idx for _iid, actual_idx in self.selected_cells)
         else:
-            start_row_idx, start_col = 0, 3
+            start_row_idx = 0
+            start_col = min(self.editable_actual_indices)
         updates: dict[tuple[str, int], str] = {}
         for dr, line in enumerate(matrix):
             rr = start_row_idx + dr
@@ -575,7 +654,7 @@ class App:
                 cc = start_col + dc
                 if cc >= len(self.param_columns):
                     break
-                if cc not in self.editable_columns:
+                if cc not in self.editable_actual_indices:
                     continue
                 if cc == 6 and self.output_type_var.get() == "Qsp":
                     continue
@@ -616,38 +695,37 @@ class App:
                         self.error_cells[(iid, col_map[k])] = "；".join(msgs)
             else:
                 self.param_tree.item(iid, tags=())
-        self._redraw_cell_overlay()
+        self._redraw_selection_overlay()
 
-    def _edit_param_cell(self, event):
-        cell = self._event_to_actual_cell(event)
-        if not cell:
-            return
-        iid, ci = cell
-        if ci <= 2:
-            return
-        if ci == 6 and self.output_type_var.get() == "Qsp":
-            return
-        col = self._actual_col_to_display_col_id(ci)
+    def _open_cell_editor(self, iid: str, actual_idx: int) -> None:
+        col = self._actual_index_to_display_col_id(actual_idx)
         if col is None:
             return
-        x, y, w, h = self.param_tree.bbox(iid, col)
+        bbox = self.param_tree.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
         old_vals = list(self.param_tree.item(iid, "values"))
         editor = ttk.Entry(self.param_tree)
         editor.place(x=x, y=y, width=w, height=h)
-        editor.insert(0, old_vals[ci])
+        editor.insert(0, old_vals[actual_idx])
         editor.focus_set()
 
         def save(_e=None):
-            old_vals[ci] = editor.get()
+            old_vals[actual_idx] = editor.get()
             self.param_tree.item(iid, values=old_vals)
             self._refresh_error_states()
             editor.destroy()
 
+        def cancel(_e=None):
+            editor.destroy()
+
         editor.bind("<Return>", save)
+        editor.bind("<Escape>", cancel)
         editor.bind("<FocusOut>", save)
 
     def _set_focus_cell(self, iid: str, column_index: int) -> None:
-        col = self._actual_col_to_display_col_id(column_index)
+        col = self._actual_index_to_display_col_id(column_index)
         if col is None:
             return
         self.param_tree.focus(iid)
