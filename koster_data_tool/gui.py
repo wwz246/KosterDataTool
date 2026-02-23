@@ -7,62 +7,17 @@ import re
 import subprocess
 import threading
 import tkinter as tk
-import ctypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
+from .canvas_table import CanvasTable
 from .export_pipeline import run_full_export
 from .param_validation import coerce_int_strict, validate_battery_row, validate_global
 from .scanner import ScanResult, scan_root
 from .state_store import read_last_root, write_last_root
 
 WINDOW_TITLE = "科斯特工作站电化学数据处理"
-
-
-class OverlayLayer:
-    def __init__(self, root: tk.Tk):
-        self.win = tk.Toplevel(root)
-        self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True)
-        self.key_color = "#ff00ff"
-        self.win.configure(bg=self.key_color)
-        try:
-            self.win.wm_attributes("-transparentcolor", self.key_color)
-        except tk.TclError:
-            pass
-        self.canvas = tk.Canvas(self.win, bg=self.key_color, highlightthickness=0, bd=0)
-        self.canvas.pack(fill="both", expand=True)
-        self._enable_click_through()
-
-    def _enable_click_through(self) -> None:
-        if os.name != "nt":
-            return
-        hwnd = self.win.winfo_id()
-        WS_EX_LAYERED = 0x00080000
-        WS_EX_TRANSPARENT = 0x00000020
-        GWL_EXSTYLE = -20
-        user32 = ctypes.windll.user32
-        current_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
-
-    def sync_to_widget(self, widget: ttk.Treeview) -> None:
-        x = widget.winfo_rootx()
-        y = widget.winfo_rooty()
-        w = widget.winfo_width()
-        h = widget.winfo_height()
-        self.win.geometry(f"{w}x{h}+{x}+{y}")
-        self.canvas.configure(width=w, height=h)
-
-    def clear(self) -> None:
-        self.canvas.delete("all")
-
-    def draw_cell_rects(self, rects: list[tuple[int, int, int, int]]) -> None:
-        for x1, y1, x2, y2 in rects:
-            self.canvas.create_rectangle(x1, y1, x2, y2, outline="#0078d7", width=2)
-
-    def destroy(self) -> None:
-        self.win.destroy()
 
 
 class App:
@@ -97,20 +52,8 @@ class App:
         self._blink_on = False
         self.param_columns = ["name", "cvmax", "gcdmax", "m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
         self.editable_column_keys = ["m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
-        self.editable_actual_indices = {self.param_columns.index(key) for key in self.editable_column_keys}
-        self.selected_cells: set[tuple[str, int]] = set()
-        self.anchor_cell: tuple[str, int] | None = None
-        self.drag_start_cell: tuple[str, int] | None = None
-        self.drag_started = False
-        self.drag_start_xy = (0, 0)
-        self.drag_threshold = 6
-        self.error_cells: dict[tuple[str, int], str] = {}
-        self.undo_snapshot: dict[tuple[str, int], str] | None = None
-        self.tooltip: tk.Toplevel | None = None
-        self.tooltip_var = tk.StringVar(value="")
-        self.overlay: OverlayLayer | None = None
-        self.param_y_scroll: ttk.Scrollbar | None = None
-        self.param_x_scroll: ttk.Scrollbar | None = None
+        self.readonly_column_keys = {"name", "cvmax", "gcdmax"}
+        self.param_table: CanvasTable | None = None
         self.filter_tab_visible = True
         self._final_stage_seen = False
         self._pending_export_result: dict | None = None
@@ -157,9 +100,6 @@ class App:
         ttk.Progressbar(bottom, orient="horizontal", mode="determinate", maximum=100, variable=self.progress_value_var, length=220).pack(side="left", padx=(12, 0))
 
     def _on_close(self) -> None:
-        if self.overlay is not None:
-            self.overlay.destroy()
-            self.overlay = None
         self.root.destroy()
 
     def _build_step1(self) -> None:
@@ -210,49 +150,16 @@ class App:
             foreground="#444444",
         ).pack(anchor="w", pady=(0, 6))
 
-        tree_wrap = ttk.Frame(self.param_page)
-        tree_wrap.pack(fill="both", expand=True)
+        table_wrap = ttk.Frame(self.param_page)
+        table_wrap.pack(fill="both", expand=True)
 
-        self.param_tree = ttk.Treeview(
-            tree_wrap,
-            columns=tuple(self.param_columns),
-            show="headings",
-            height=10,
+        self.param_table = CanvasTable(
+            table_wrap,
+            columns=self._build_table_columns(),
+            rows=[],
+            readonly_cols=self.readonly_column_keys,
         )
-        for c, t in [
-            ("name", "电池名"), ("cvmax", "CV最大圈数"), ("gcdmax", "GCD最大圈数"), ("m_pos", "m_pos(mg)"), ("m_neg", "m_neg(mg)"),
-            ("p_active", "p_active(%)"), ("k", "K(—)"), ("n_cv", "N_CV"), ("n_gcd", "N_GCD"), ("v_start", "V_start(V)"), ("v_end", "V_end(V)"),
-        ]:
-            self.param_tree.heading(c, text=t)
-            self.param_tree.column(c, width=100, anchor="center")
-        self.param_tree.tag_configure("row_error", background="#ffeaea")
-        self.param_y_scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self._param_tree_yview)
-        self.param_x_scroll = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self._param_tree_xview)
-        self.param_tree.configure(yscrollcommand=self._on_tree_yscroll, xscrollcommand=self._on_tree_xscroll)
-        self.param_tree.grid(row=0, column=0, sticky="nsew")
-        self.param_y_scroll.grid(row=0, column=1, sticky="ns")
-        self.param_x_scroll.grid(row=1, column=0, sticky="ew")
-        tree_wrap.columnconfigure(0, weight=1)
-        tree_wrap.rowconfigure(0, weight=1)
-
-        self.overlay = OverlayLayer(self.root)
-
-        self.param_tree.bind("<Button-1>", self._on_cell_click)
-        self.param_tree.bind("<Control-Button-1>", self._on_cell_ctrl_click)
-        self.param_tree.bind("<Shift-Button-1>", self._on_cell_shift_click)
-        self.param_tree.bind("<B1-Motion>", self._on_cell_drag)
-        self.param_tree.bind("<ButtonRelease-1>", self._on_cell_release)
-        self.param_tree.bind("<Double-Button-1>", self._on_cell_double_click)
-        self.param_tree.bind("<Motion>", self._on_cell_hover)
-        self.param_tree.bind("<Leave>", lambda _e: self._hide_tooltip())
-        self.param_tree.bind("<Control-c>", self._copy_selection)
-        self.param_tree.bind("<Control-v>", self._paste_multi_value)
-        self.param_tree.bind("<Control-z>", self._undo_last_edit)
-        self.param_tree.bind("<Configure>", lambda _e: self._sync_overlay_and_redraw())
-        self.root.bind("<Configure>", lambda _e: self._sync_overlay_and_redraw())
-        self.root.bind("<Unmap>", self._on_root_unmap)
-        self.root.bind("<Map>", self._on_root_map)
-        self.root.after_idle(self._sync_overlay_and_redraw)
+        self.param_table.pack(fill="both", expand=True)
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
@@ -280,44 +187,32 @@ class App:
         ttk.Button(btns, text="清空缓存", command=self._clear_cache).pack(side="left", padx=8)
         ttk.Button(btns, text="确定导出", command=self._confirm_export).pack(side="left")
 
+    def _build_table_columns(self) -> list[dict]:
+        all_columns = [
+            {"key": "name", "title": "电池名", "width": 140},
+            {"key": "cvmax", "title": "CV最大圈数", "width": 110},
+            {"key": "gcdmax", "title": "GCD最大圈数", "width": 120},
+            {"key": "m_pos", "title": "m_pos(mg)", "width": 100},
+            {"key": "m_neg", "title": "m_neg(mg)", "width": 100},
+            {"key": "p_active", "title": "p_active(%)", "width": 100},
+            {"key": "k", "title": "K(—)", "width": 90},
+            {"key": "n_cv", "title": "N_CV", "width": 90},
+            {"key": "n_gcd", "title": "N_GCD", "width": 90},
+            {"key": "v_start", "title": "V_start(V)", "width": 100},
+            {"key": "v_end", "title": "V_end(V)", "width": 100},
+        ]
+        if self.output_type_var.get() == "Qsp":
+            return [c for c in all_columns if c["key"] != "k"]
+        return all_columns
+
     def _on_output_type_change(self):
-        output_type = self.output_type_var.get()
-        display_cols = list(self.param_columns)
-        if output_type == "Qsp":
-            display_cols.remove("k")
-        self.param_tree.configure(displaycolumns=display_cols)
-        for iid in self.param_tree.get_children():
-            vals = list(self.param_tree.item(iid, "values"))
-            if output_type == "Qsp":
-                vals[6] = 1
-            self.param_tree.item(iid, values=vals)
+        if self.param_table is None:
+            return
+        if self.output_type_var.get() == "Qsp":
+            for row in self.param_table.rows:
+                row["k"] = 1
+        self.param_table.set_columns(self._build_table_columns())
         self._refresh_error_states()
-
-
-    def _param_tree_yview(self, *args) -> None:
-        self.param_tree.yview(*args)
-        self._sync_overlay_and_redraw()
-
-    def _param_tree_xview(self, *args) -> None:
-        self.param_tree.xview(*args)
-        self._sync_overlay_and_redraw()
-
-    def _on_tree_yscroll(self, first, last) -> None:
-        if self.param_y_scroll is not None:
-            self.param_y_scroll.set(first, last)
-        self._sync_overlay_and_redraw()
-
-    def _on_tree_xscroll(self, first, last) -> None:
-        if self.param_x_scroll is not None:
-            self.param_x_scroll.set(first, last)
-        self._sync_overlay_and_redraw()
-
-    def _on_root_unmap(self, _event) -> None:
-        if self.overlay is not None:
-            self.overlay.win.withdraw()
-
-    def _on_root_map(self, _event) -> None:
-        self._sync_overlay_and_redraw()
 
     def _load_default_open_dir(self) -> None:
         last_root = read_last_root(self.ctx.paths.state_dir)
@@ -362,7 +257,8 @@ class App:
 
     def _reset_scan_result_state(self) -> None:
         self.scan_result = None
-        self.param_tree.delete(*self.param_tree.get_children())
+        if self.param_table is not None:
+            self.param_table.set_rows([])
         for lb in (self.bat_list, self.cv_list, self.gcd_list, self.eis_list):
             lb.delete(0, "end")
         self.stage_var.set("待机")
@@ -428,14 +324,26 @@ class App:
                     )
 
     def _fill_step2(self, result: ScanResult):
-        self.param_tree.delete(*self.param_tree.get_children())
-        self.selected_cells.clear()
-        self.anchor_cell = None
-        self.drag_start_cell = None
-        self.drag_started = False
-        self.error_cells.clear()
+        rows = []
         for b in sorted(result.batteries, key=lambda x: x.name):
-            self.param_tree.insert("", "end", values=(b.name, b.cv_max_cycle if b.cv_max_cycle is not None else "-", b.gcd_max_cycle if b.gcd_max_cycle is not None else "-", self.default_row_values["m_pos"], self.default_row_values["m_neg"], self.default_row_values["p_active"], self.default_row_values["k"], self.default_row_values["n_cv"], self.default_row_values["n_gcd"], self.default_row_values["v_start"], self.default_row_values["v_end"]))
+            rows.append(
+                {
+                    "name": b.name,
+                    "cvmax": b.cv_max_cycle if b.cv_max_cycle is not None else "-",
+                    "gcdmax": b.gcd_max_cycle if b.gcd_max_cycle is not None else "-",
+                    "m_pos": self.default_row_values["m_pos"],
+                    "m_neg": self.default_row_values["m_neg"],
+                    "p_active": self.default_row_values["p_active"],
+                    "k": self.default_row_values["k"],
+                    "n_cv": self.default_row_values["n_cv"],
+                    "n_gcd": self.default_row_values["n_gcd"],
+                    "v_start": self.default_row_values["v_start"],
+                    "v_end": self.default_row_values["v_end"],
+                }
+            )
+        if self.param_table is not None:
+            self.param_table.set_rows(rows)
+            self.param_table.set_columns(self._build_table_columns())
         self._init_filter_lists(result)
         self._load_cache_or_keep()
         self._on_output_type_change()
@@ -467,416 +375,105 @@ class App:
         if self.eis_list.size() > 0:
             self.eis_list.select_set(self.eis_list.size() - 1)
 
-    def _get_display_col_keys(self) -> list[str]:
-        display_cols = self.param_tree.cget("displaycolumns")
-        if display_cols in ("", (), []):
-            return list(self.param_tree.cget("columns"))
-        if display_cols in ("#all", ("#all",), ["#all"]):
-            return list(self.param_tree.cget("columns"))
-        return list(display_cols)
-
-    def _col_key_to_actual_index(self, col_key: str) -> int:
-        return self.param_columns.index(col_key)
-
-    def _actual_index_to_display_col_id(self, actual_idx: int) -> str | None:
-        if actual_idx < 0 or actual_idx >= len(self.param_columns):
-            return None
-        display_col_keys = self._get_display_col_keys()
-        col_key = self.param_columns[actual_idx]
-        if col_key not in display_col_keys:
-            return None
-        return f"#{display_col_keys.index(col_key) + 1}"
-
-    def _event_to_cell(self, event) -> tuple[str, int] | None:
-        iid = self.param_tree.identify_row(event.y)
-        display_col_id = self.param_tree.identify_column(event.x)
-        if not iid or not display_col_id:
-            return None
-        if display_col_id == "#0":
-            return None
-        display_col_keys = self._get_display_col_keys()
-        try:
-            display_idx = int(display_col_id[1:]) - 1
-        except (TypeError, ValueError):
-            return None
-        if display_idx < 0 or display_idx >= len(display_col_keys):
-            return None
-        return iid, self._col_key_to_actual_index(display_col_keys[display_idx])
-
-    def _row_index(self, iid: str) -> int:
-        children = list(self.param_tree.get_children(""))
-        return children.index(iid)
-
-    def _iid_from_row_index(self, idx: int) -> str:
-        children = list(self.param_tree.get_children(""))
-        return children[idx]
-
-    def _sync_overlay_and_redraw(self) -> None:
-        if self.overlay is None:
-            return
-        if self.root.state() == "iconic":
-            self.overlay.win.withdraw()
-            return
-        self.overlay.win.deiconify()
-        self.overlay.sync_to_widget(self.param_tree)
-        self._redraw_selection_overlay()
-
-    def _redraw_selection_overlay(self) -> None:
-        if self.overlay is None:
-            return
-        rects: list[tuple[int, int, int, int]] = []
-        for iid, actual_idx in sorted(self.selected_cells):
-            display_id = self._actual_index_to_display_col_id(actual_idx)
-            if display_id is None:
-                continue
-            bbox = self.param_tree.bbox(iid, display_id)
-            if not bbox:
-                continue
-            x, y, w, h = bbox
-            rects.append((x, y, x + w, y + h))
-        self.overlay.clear()
-        self.overlay.draw_cell_rects(rects)
-
-    def _select_rect_cells(self, start: tuple[str, int], end: tuple[str, int]) -> None:
-        s_iid, s_col = start
-        e_iid, e_col = end
-        r0 = self._row_index(s_iid)
-        r1 = self._row_index(e_iid)
-        r_lo, r_hi = min(r0, r1), max(r0, r1)
-        c_lo, c_hi = min(s_col, e_col), max(s_col, e_col)
-        self.selected_cells.clear()
-        for row_idx in range(r_lo, r_hi + 1):
-            iid = self._iid_from_row_index(row_idx)
-            for actual_idx in range(c_lo, c_hi + 1):
-                if actual_idx in self.editable_actual_indices:
-                    self.selected_cells.add((iid, actual_idx))
-
-    def _on_cell_click(self, event):
-        self.param_tree.focus_set()
-        cell = self._event_to_cell(event)
-        if cell is None:
-            return "break"
-        self.selected_cells.clear()
-        if cell[1] in self.editable_actual_indices:
-            self.selected_cells.add(cell)
-        self.anchor_cell = cell
-        self.drag_start_cell = cell
-        self.drag_start_xy = (event.x, event.y)
-        self.drag_started = False
-        self._sync_overlay_and_redraw()
-        return "break"
-
-    def _on_cell_ctrl_click(self, event):
-        self.param_tree.focus_set()
-        cell = self._event_to_cell(event)
-        if cell is None:
-            return "break"
-        if cell[1] not in self.editable_actual_indices:
-            return "break"
-        if cell in self.selected_cells:
-            self.selected_cells.remove(cell)
-        else:
-            self.selected_cells.add(cell)
-        self._sync_overlay_and_redraw()
-        return "break"
-
-    def _on_cell_shift_click(self, event):
-        self.param_tree.focus_set()
-        cell = self._event_to_cell(event)
-        if cell is None:
-            return "break"
-        if self.anchor_cell is None:
-            return self._on_cell_click(event)
-        self._select_rect_cells(self.anchor_cell, cell)
-        self.drag_start_cell = self.anchor_cell
-        self.drag_start_xy = (event.x, event.y)
-        self.drag_started = False
-        self._sync_overlay_and_redraw()
-        return "break"
-
-    def _on_cell_drag(self, event):
-        self.param_tree.focus_set()
-        if self.drag_start_cell is None:
-            return "break"
-        x0, y0 = self.drag_start_xy
-        if abs(event.x - x0) + abs(event.y - y0) < self.drag_threshold:
-            return "break"
-        self.drag_started = True
-        current_cell = self._event_to_cell(event)
-        if current_cell is None:
-            return "break"
-        self._select_rect_cells(self.drag_start_cell, current_cell)
-        self._sync_overlay_and_redraw()
-        return "break"
-
-    def _on_cell_release(self, _event):
-        self.param_tree.focus_set()
-        self.drag_start_cell = None
-        self.drag_started = False
-        return "break"
-
-    def _on_cell_double_click(self, event):
-        self.param_tree.focus_set()
-        cell = self._event_to_cell(event)
-        if cell is None:
-            return "break"
-        iid, actual_idx = cell
-        if actual_idx not in self.editable_actual_indices:
-            return "break"
-        if actual_idx == 6 and self.output_type_var.get() == "Qsp":
-            return "break"
-        self.selected_cells.clear()
-        self.selected_cells.add(cell)
-        self.anchor_cell = cell
-        self._sync_overlay_and_redraw()
-        self._open_cell_editor(iid, actual_idx)
-        return "break"
-
-    def _on_cell_hover(self, event):
-        self.param_tree.focus_set()
-        cell = self._event_to_cell(event)
-        if not cell or cell not in self.error_cells:
-            self._hide_tooltip()
-            return
-        self._show_tooltip(event.x_root + 12, event.y_root + 12, self.error_cells[cell])
-
-    def _show_tooltip(self, x: int, y: int, text: str):
-        if self.tooltip is None:
-            self.tooltip = tk.Toplevel(self.root)
-            self.tooltip.wm_overrideredirect(True)
-            tk.Label(self.tooltip, textvariable=self.tooltip_var, relief="solid", borderwidth=1, background="#fff8dc").pack()
-        self.tooltip_var.set(text)
-        self.tooltip.geometry(f"+{x}+{y}")
-        self.tooltip.deiconify()
-
-    def _hide_tooltip(self):
-        if self.tooltip is not None:
-            self.tooltip.withdraw()
-
-    def _copy_selection(self, _event=None):
-        if not self.selected_cells:
-            return "break"
-        rows = list(self.param_tree.get_children())
-        row_idxs = sorted({rows.index(iid) for iid, _c in self.selected_cells if iid in rows})
-        col_idxs = sorted({c for _iid, c in self.selected_cells})
-        lines = []
-        for r in row_idxs:
-            iid = rows[r]
-            vals = list(self.param_tree.item(iid, "values"))
-            lines.append("\t".join(str(vals[c]) for c in col_idxs))
-        self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join(lines))
-        return "break"
-
     def _parse_matrix(self, text: str) -> list[list[str]]:
         lines = [ln for ln in re.split(r"\r?\n", text) if ln != ""]
         return [ln.split("\t") for ln in lines]
 
-    def _apply_cell_updates(self, updates: dict[tuple[str, int], str], save_undo: bool = True) -> None:
-        if not updates:
+    def _fill_single_value(self):
+        if self.param_table is None:
             return
-        if save_undo:
-            self.undo_snapshot = {(iid, c): str(self.param_tree.item(iid, "values")[c]) for iid, c in updates}
-        for (iid, c), nv in updates.items():
-            vals = list(self.param_tree.item(iid, "values"))
-            vals[c] = nv
-            if c == 6 and self.output_type_var.get() == "Qsp":
-                continue
-            self.param_tree.item(iid, values=vals)
+        self.param_table.fill_selection(self.param_fill_var.get())
         self._refresh_error_states()
 
-    def _fill_single_value(self):
-        value = self.param_fill_var.get()
-        targets = {(iid, c) for iid, c in self.selected_cells if c in self.editable_actual_indices and not (c == 6 and self.output_type_var.get() == "Qsp")}
-        updates = {k: value for k in targets}
-        self._apply_cell_updates(updates)
-
     def _paste_multi_value(self, _event=None):
+        if self.param_table is None:
+            return "break"
         try:
             text = self.root.clipboard_get().strip()
         except Exception:
             return "break"
-        if not text:
-            return "break"
         matrix = self._parse_matrix(text)
-        if not matrix:
-            return "break"
-        rows = list(self.param_tree.get_children())
-        if not rows:
-            return "break"
-        if self.selected_cells:
-            start_row_idx = min(self._row_index(iid) for iid, _c in self.selected_cells)
-            start_col = min(actual_idx for _iid, actual_idx in self.selected_cells)
-        else:
-            start_row_idx = 0
-            start_col = min(self.editable_actual_indices)
-        updates: dict[tuple[str, int], str] = {}
-        for dr, line in enumerate(matrix):
-            rr = start_row_idx + dr
-            if rr >= len(rows):
-                break
-            for dc, value in enumerate(line):
-                cc = start_col + dc
-                if cc >= len(self.param_columns):
-                    break
-                if cc not in self.editable_actual_indices:
-                    continue
-                if cc == 6 and self.output_type_var.get() == "Qsp":
-                    continue
-                updates[(rows[rr], cc)] = value
-        self._apply_cell_updates(updates)
-        return "break"
-
-    def _undo_last_edit(self, _event=None):
-        if self.undo_snapshot:
-            self._apply_cell_updates(self.undo_snapshot, save_undo=False)
-            self.undo_snapshot = None
+        self.param_table.paste_matrix(matrix)
+        self._refresh_error_states()
         return "break"
 
     def _refresh_error_states(self):
-        self.error_cells.clear()
-        for iid in self.param_tree.get_children():
-            vals = list(self.param_tree.item(iid, "values"))
-            cv_max = coerce_int_strict(str(vals[1]))
-            gcd_max = coerce_int_strict(str(vals[2]))
+        if self.param_table is None:
+            return
+        self.param_table.invalid_cells.clear()
+        for row_idx, row in enumerate(self.param_table.rows):
+            cv_max = coerce_int_strict(str(row.get("cvmax", "")))
+            gcd_max = coerce_int_strict(str(row.get("gcdmax", "")))
             row_errors = validate_battery_row(
                 output_type=self.output_type_var.get(),
-                m_pos=vals[3],
-                m_neg=vals[4],
-                p_active=vals[5],
-                k=vals[6],
-                n_cv=vals[7],
-                n_gcd=vals[8],
-                v_start=vals[9],
-                v_end=vals[10],
+                m_pos=row.get("m_pos", ""),
+                m_neg=row.get("m_neg", ""),
+                p_active=row.get("p_active", ""),
+                k=row.get("k", ""),
+                n_cv=row.get("n_cv", ""),
+                n_gcd=row.get("n_gcd", ""),
+                v_start=row.get("v_start", ""),
+                v_end=row.get("v_end", ""),
                 cv_max=cv_max,
                 gcd_max=gcd_max,
             )
-            if row_errors:
-                self.param_tree.item(iid, tags=("row_error",))
-                col_map = {"m_pos": 3, "m_neg": 4, "p_active": 5, "k": 6, "n_cv": 7, "n_gcd": 8, "v_start": 9, "v_end": 10}
-                for k, msgs in row_errors.items():
-                    if k in col_map:
-                        self.error_cells[(iid, col_map[k])] = "；".join(msgs)
-            else:
-                self.param_tree.item(iid, tags=())
-        self._sync_overlay_and_redraw()
-
-    def _open_cell_editor(self, iid: str, actual_idx: int) -> None:
-        col = self._actual_index_to_display_col_id(actual_idx)
-        if col is None:
-            return
-        bbox = self.param_tree.bbox(iid, col)
-        if not bbox:
-            return
-        x, y, w, h = bbox
-        old_vals = list(self.param_tree.item(iid, "values"))
-        editor = ttk.Entry(self.param_tree)
-        editor.place(x=x, y=y, width=w, height=h)
-        editor.insert(0, old_vals[actual_idx])
-        editor.focus_set()
-
-        def save(_e=None):
-            old_vals[actual_idx] = editor.get()
-            self.param_tree.item(iid, values=old_vals)
-            self._refresh_error_states()
-            editor.destroy()
-            self._sync_overlay_and_redraw()
-
-        def cancel(_e=None):
-            editor.destroy()
-            self._sync_overlay_and_redraw()
-
-        editor.bind("<Return>", save)
-        editor.bind("<Escape>", cancel)
-        editor.bind("<FocusOut>", save)
-
-    def _set_focus_cell(self, iid: str, column_index: int) -> None:
-        col = self._actual_index_to_display_col_id(column_index)
-        if col is None:
-            return
-        self.param_tree.focus(iid)
-        self.param_tree.selection_set(iid)
-        self.param_tree.focus_set()
-        self.param_tree.see(iid)
-        self.param_tree.update_idletasks()
-        bbox = self.param_tree.bbox(iid, col)
-        if bbox:
-            x, y, w, h = bbox
-            self.param_tree.event_generate("<Button-1>", x=x + max(2, w // 3), y=y + max(2, h // 2))
-
-    def _blink_error_cell(self, iid: str, column_index: int) -> None:
-        if self._blink_job is not None:
-            self.root.after_cancel(self._blink_job)
-            self._blink_job = None
-        self._blink_on = False
-
-        def toggle(count: int = 0):
-            self._set_focus_cell(iid, column_index)
-            self._blink_on = not self._blink_on
-            if self._blink_on:
-                self.param_tree.tag_configure("error_focus", background="#ffe1e1")
-                self.param_tree.item(iid, tags=("error_focus",))
-            else:
-                self.param_tree.item(iid, tags=())
-            if count < 3:
-                self._blink_job = self.root.after(180, lambda: toggle(count + 1))
-            else:
-                self.param_tree.item(iid, tags=("error_focus",))
-                self._blink_job = None
-
-        toggle()
+            col_map = {"m_pos": "m_pos", "m_neg": "m_neg", "p_active": "p_active", "k": "k", "n_cv": "n_cv", "n_gcd": "n_gcd", "v_start": "v_start", "v_end": "v_end"}
+            for key, msgs in row_errors.items():
+                if key in col_map:
+                    self.param_table.set_invalid((row_idx, col_map[key]), "；".join(msgs))
+        self.param_table.redraw()
 
     def _validate_all_rows(self):
-        first_iid = next(iter(self.param_tree.get_children()), None)
+        first_row = 0 if self.param_table and self.param_table.rows else None
         try:
             a_geom = float(self.a_geom_var.get())
         except Exception:
-            return {"global": ["A_geom 必须 > 0"]}, ((first_iid, 3) if first_iid else None)
+            return {"global": ["A_geom 必须 > 0"]}, ((first_row, "m_pos") if first_row is not None else None)
         output_type = self.output_type_var.get()
         global_errors = validate_global(output_type=output_type, a_geom=a_geom)
         if global_errors:
-            return {"global": global_errors}, ((first_iid, 3) if first_iid else None)
+            return {"global": global_errors}, ((first_row, "m_pos") if first_row is not None else None)
 
-        for iid in self.param_tree.get_children():
-            vals = list(self.param_tree.item(iid, "values"))
-            cv_max = coerce_int_strict(str(vals[1]))
-            gcd_max = coerce_int_strict(str(vals[2]))
+        if self.param_table is None:
+            return {}, None
+        for row_idx, row in enumerate(self.param_table.rows):
+            cv_max = coerce_int_strict(str(row.get("cvmax", "")))
+            gcd_max = coerce_int_strict(str(row.get("gcdmax", "")))
             row_errors = validate_battery_row(
                 output_type=output_type,
-                m_pos=vals[3],
-                m_neg=vals[4],
-                p_active=vals[5],
-                k=vals[6],
-                n_cv=vals[7],
-                n_gcd=vals[8],
-                v_start=vals[9],
-                v_end=vals[10],
+                m_pos=row.get("m_pos", ""),
+                m_neg=row.get("m_neg", ""),
+                p_active=row.get("p_active", ""),
+                k=row.get("k", ""),
+                n_cv=row.get("n_cv", ""),
+                n_gcd=row.get("n_gcd", ""),
+                v_start=row.get("v_start", ""),
+                v_end=row.get("v_end", ""),
                 cv_max=cv_max,
                 gcd_max=gcd_max,
             )
             if row_errors:
                 order = ["m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
-                col_idx = {"m_pos": 3, "m_neg": 4, "p_active": 5, "k": 6, "n_cv": 7, "n_gcd": 8, "v_start": 9, "v_end": 10}
                 first_field = next((f for f in order if f in row_errors), next(iter(row_errors)))
-                return row_errors, (iid, col_idx[first_field])
+                return row_errors, (row_idx, first_field)
         return {}, None
 
     def _collect_params(self):
         out = {"a_geom": float(self.a_geom_var.get()), "output_type": self.output_type_var.get(), "export_battery_workbook": bool(self.export_book_var.get()), "battery_params": {}}
         first_error = None
-        for iid in self.param_tree.get_children():
-            vals = list(self.param_tree.item(iid, "values"))
+        if self.param_table is None:
+            return out
+        for row in self.param_table.rows:
             try:
                 bp = {
-                    "m_pos": float(vals[3]), "m_neg": float(vals[4]), "p_active": float(vals[5]),
-                    "k": float(vals[6]) if self.output_type_var.get() == "Csp" else 1.0,
-                    "n_cv": int(vals[7]), "n_gcd": int(vals[8]), "v_start": float(vals[9]), "v_end": float(vals[10]),
+                    "m_pos": float(row["m_pos"]), "m_neg": float(row["m_neg"]), "p_active": float(row["p_active"]),
+                    "k": float(row["k"]) if self.output_type_var.get() == "Csp" else 1.0,
+                    "n_cv": int(row["n_cv"]), "n_gcd": int(row["n_gcd"]), "v_start": float(row["v_start"]), "v_end": float(row["v_end"]),
                 }
                 bp["main_order"] = "先充后放"
-                out["battery_params"][str(vals[0])] = bp
+                out["battery_params"][str(row["name"])] = bp
             except Exception:
-                first_error = str(vals[0])
+                first_error = str(row.get("name", ""))
                 break
         if first_error:
             raise ValueError(f"参数非法：{first_error}")
@@ -915,8 +512,13 @@ class App:
         if not cur:
             return
         vals = cur.get("rows", [])
-        for iid, row in zip(self.param_tree.get_children(), vals):
-            self.param_tree.item(iid, values=row)
+        if self.param_table is None:
+            return
+        for row_idx, row in enumerate(vals):
+            if row_idx >= len(self.param_table.rows):
+                break
+            self.param_table.rows[row_idx].update(row)
+        self.param_table.redraw()
 
     def _save_cache(self):
         if not self.selected_root:
@@ -926,7 +528,7 @@ class App:
         obj = {}
         if cp.exists():
             obj = json.loads(cp.read_text(encoding="utf-8"))
-        rows = [list(self.param_tree.item(iid, "values")) for iid in self.param_tree.get_children()]
+        rows = self.param_table.rows if self.param_table is not None else []
         obj[str(self.selected_root)] = {"rows": rows}
         cp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -936,9 +538,6 @@ class App:
             cp.unlink()
         if self.scan_result is not None:
             self._fill_step2(self.scan_result)
-        self.undo_snapshot = None
-        self.error_cells.clear()
-        self.selected_cells.clear()
         self._refresh_error_states()
         messagebox.showinfo(WINDOW_TITLE, "缓存已清空，并恢复为扫描默认值")
 
@@ -952,9 +551,10 @@ class App:
         errors, first_cell = self._validate_all_rows()
         if errors:
             if first_cell is not None:
-                iid, col_idx = first_cell
-                self.param_tree.see(iid)
-                self._blink_error_cell(iid, col_idx)
+                row_idx, col_key = first_cell
+                if self.param_table is not None:
+                    self.param_table.scroll_to_cell(row_idx, col_key)
+                    self.param_table.focus_cell(row_idx, col_key)
             messagebox.showerror(WINDOW_TITLE, "参数存在错误，已定位到第一个错误单元格")
             return
         try:
