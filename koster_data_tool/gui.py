@@ -7,6 +7,7 @@ import re
 import subprocess
 import threading
 import tkinter as tk
+import ctypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,6 +18,51 @@ from .scanner import ScanResult, scan_root
 from .state_store import read_last_root, write_last_root
 
 WINDOW_TITLE = "科斯特工作站电化学数据处理"
+
+
+class OverlayLayer:
+    def __init__(self, root: tk.Tk):
+        self.win = tk.Toplevel(root)
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.key_color = "#ff00ff"
+        self.win.configure(bg=self.key_color)
+        try:
+            self.win.wm_attributes("-transparentcolor", self.key_color)
+        except tk.TclError:
+            pass
+        self.canvas = tk.Canvas(self.win, bg=self.key_color, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self._enable_click_through()
+
+    def _enable_click_through(self) -> None:
+        if os.name != "nt":
+            return
+        hwnd = self.win.winfo_id()
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        GWL_EXSTYLE = -20
+        user32 = ctypes.windll.user32
+        current_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+
+    def sync_to_widget(self, widget: ttk.Treeview) -> None:
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty()
+        w = widget.winfo_width()
+        h = widget.winfo_height()
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.canvas.configure(width=w, height=h)
+
+    def clear(self) -> None:
+        self.canvas.delete("all")
+
+    def draw_cell_rects(self, rects: list[tuple[int, int, int, int]]) -> None:
+        for x1, y1, x2, y2 in rects:
+            self.canvas.create_rectangle(x1, y1, x2, y2, outline="#0078d7", width=2)
+
+    def destroy(self) -> None:
+        self.win.destroy()
 
 
 class App:
@@ -62,7 +108,7 @@ class App:
         self.undo_snapshot: dict[tuple[str, int], str] | None = None
         self.tooltip: tk.Toplevel | None = None
         self.tooltip_var = tk.StringVar(value="")
-        self.cell_overlay: tk.Canvas | None = None
+        self.overlay: OverlayLayer | None = None
         self.param_y_scroll: ttk.Scrollbar | None = None
         self.param_x_scroll: ttk.Scrollbar | None = None
         self.filter_tab_visible = True
@@ -76,6 +122,7 @@ class App:
     def _build_ui(self) -> None:
         self.root.title(WINDOW_TITLE)
         self.root.geometry("1180x760")
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         top = ttk.Frame(self.root, padding=10)
         top.pack(fill="x")
@@ -108,6 +155,12 @@ class App:
         ttk.Label(bottom, text=" 跳过文件数:").pack(side="left", padx=(12, 0))
         ttk.Label(bottom, textvariable=self.skipped_file_count_var).pack(side="left")
         ttk.Progressbar(bottom, orient="horizontal", mode="determinate", maximum=100, variable=self.progress_value_var, length=220).pack(side="left", padx=(12, 0))
+
+    def _on_close(self) -> None:
+        if self.overlay is not None:
+            self.overlay.destroy()
+            self.overlay = None
+        self.root.destroy()
 
     def _build_step1(self) -> None:
         actions = ttk.Frame(self.page1)
@@ -182,21 +235,24 @@ class App:
         tree_wrap.columnconfigure(0, weight=1)
         tree_wrap.rowconfigure(0, weight=1)
 
-        self.cell_overlay = tk.Canvas(self.param_tree, highlightthickness=0, bd=0)
-        self.cell_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.overlay = OverlayLayer(self.root)
 
-        self.cell_overlay.bind("<Button-1>", self._on_cell_click)
-        self.cell_overlay.bind("<Control-Button-1>", self._on_cell_ctrl_click)
-        self.cell_overlay.bind("<Shift-Button-1>", self._on_cell_shift_click)
-        self.cell_overlay.bind("<B1-Motion>", self._on_cell_drag)
-        self.cell_overlay.bind("<ButtonRelease-1>", self._on_cell_release)
-        self.cell_overlay.bind("<Double-Button-1>", self._on_cell_double_click)
-        self.cell_overlay.bind("<Motion>", self._on_cell_hover)
-        self.cell_overlay.bind("<Leave>", lambda _e: self._hide_tooltip())
+        self.param_tree.bind("<Button-1>", self._on_cell_click)
+        self.param_tree.bind("<Control-Button-1>", self._on_cell_ctrl_click)
+        self.param_tree.bind("<Shift-Button-1>", self._on_cell_shift_click)
+        self.param_tree.bind("<B1-Motion>", self._on_cell_drag)
+        self.param_tree.bind("<ButtonRelease-1>", self._on_cell_release)
+        self.param_tree.bind("<Double-Button-1>", self._on_cell_double_click)
+        self.param_tree.bind("<Motion>", self._on_cell_hover)
+        self.param_tree.bind("<Leave>", lambda _e: self._hide_tooltip())
         self.param_tree.bind("<Control-c>", self._copy_selection)
         self.param_tree.bind("<Control-v>", self._paste_multi_value)
         self.param_tree.bind("<Control-z>", self._undo_last_edit)
-        self.param_tree.bind("<Configure>", lambda _e: self._redraw_selection_overlay())
+        self.param_tree.bind("<Configure>", lambda _e: self._sync_overlay_and_redraw())
+        self.root.bind("<Configure>", lambda _e: self._sync_overlay_and_redraw())
+        self.root.bind("<Unmap>", self._on_root_unmap)
+        self.root.bind("<Map>", self._on_root_map)
+        self.root.after_idle(self._sync_overlay_and_redraw)
 
         sel_frame = ttk.Frame(self.filter_page)
         sel_frame.pack(fill="both", expand=True)
@@ -240,21 +296,28 @@ class App:
 
     def _param_tree_yview(self, *args) -> None:
         self.param_tree.yview(*args)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
 
     def _param_tree_xview(self, *args) -> None:
         self.param_tree.xview(*args)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
 
     def _on_tree_yscroll(self, first, last) -> None:
         if self.param_y_scroll is not None:
             self.param_y_scroll.set(first, last)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
 
     def _on_tree_xscroll(self, first, last) -> None:
         if self.param_x_scroll is not None:
             self.param_x_scroll.set(first, last)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
+
+    def _on_root_unmap(self, _event) -> None:
+        if self.overlay is not None:
+            self.overlay.win.withdraw()
+
+    def _on_root_map(self, _event) -> None:
+        self._sync_overlay_and_redraw()
 
     def _load_default_open_dir(self) -> None:
         last_root = read_last_root(self.ctx.paths.state_dir)
@@ -448,10 +511,20 @@ class App:
         children = list(self.param_tree.get_children(""))
         return children[idx]
 
-    def _redraw_selection_overlay(self) -> None:
-        if self.cell_overlay is None:
+    def _sync_overlay_and_redraw(self) -> None:
+        if self.overlay is None:
             return
-        self.cell_overlay.delete("sel")
+        if self.root.state() == "iconic":
+            self.overlay.win.withdraw()
+            return
+        self.overlay.win.deiconify()
+        self.overlay.sync_to_widget(self.param_tree)
+        self._redraw_selection_overlay()
+
+    def _redraw_selection_overlay(self) -> None:
+        if self.overlay is None:
+            return
+        rects: list[tuple[int, int, int, int]] = []
         for iid, actual_idx in sorted(self.selected_cells):
             display_id = self._actual_index_to_display_col_id(actual_idx)
             if display_id is None:
@@ -460,17 +533,9 @@ class App:
             if not bbox:
                 continue
             x, y, w, h = bbox
-            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#0078d7", width=2, tags=("sel",))
-        self.cell_overlay.delete("err")
-        for (iid, actual_idx), _msg in self.error_cells.items():
-            display_id = self._actual_index_to_display_col_id(actual_idx)
-            if display_id is None:
-                continue
-            bbox = self.param_tree.bbox(iid, display_id)
-            if not bbox:
-                continue
-            x, y, w, h = bbox
-            self.cell_overlay.create_rectangle(x, y, x + w, y + h, outline="#d40000", width=2, tags=("err",))
+            rects.append((x, y, x + w, y + h))
+        self.overlay.clear()
+        self.overlay.draw_cell_rects(rects)
 
     def _select_rect_cells(self, start: tuple[str, int], end: tuple[str, int]) -> None:
         s_iid, s_col = start
@@ -498,7 +563,7 @@ class App:
         self.drag_start_cell = cell
         self.drag_start_xy = (event.x, event.y)
         self.drag_started = False
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
         return "break"
 
     def _on_cell_ctrl_click(self, event):
@@ -512,7 +577,7 @@ class App:
             self.selected_cells.remove(cell)
         else:
             self.selected_cells.add(cell)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
         return "break"
 
     def _on_cell_shift_click(self, event):
@@ -526,7 +591,7 @@ class App:
         self.drag_start_cell = self.anchor_cell
         self.drag_start_xy = (event.x, event.y)
         self.drag_started = False
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
         return "break"
 
     def _on_cell_drag(self, event):
@@ -541,7 +606,7 @@ class App:
         if current_cell is None:
             return "break"
         self._select_rect_cells(self.drag_start_cell, current_cell)
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
         return "break"
 
     def _on_cell_release(self, _event):
@@ -563,7 +628,7 @@ class App:
         self.selected_cells.clear()
         self.selected_cells.add(cell)
         self.anchor_cell = cell
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
         self._open_cell_editor(iid, actual_idx)
         return "break"
 
@@ -695,7 +760,7 @@ class App:
                         self.error_cells[(iid, col_map[k])] = "；".join(msgs)
             else:
                 self.param_tree.item(iid, tags=())
-        self._redraw_selection_overlay()
+        self._sync_overlay_and_redraw()
 
     def _open_cell_editor(self, iid: str, actual_idx: int) -> None:
         col = self._actual_index_to_display_col_id(actual_idx)
@@ -716,9 +781,11 @@ class App:
             self.param_tree.item(iid, values=old_vals)
             self._refresh_error_states()
             editor.destroy()
+            self._sync_overlay_and_redraw()
 
         def cancel(_e=None):
             editor.destroy()
+            self._sync_overlay_and_redraw()
 
         editor.bind("<Return>", save)
         editor.bind("<Escape>", cancel)
