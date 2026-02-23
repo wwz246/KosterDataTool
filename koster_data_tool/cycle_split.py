@@ -25,9 +25,9 @@ def split_cycles(
     if ftype == "EIS":
         return CycleSplitResult(file_type=ftype, method="none", max_cycle=None, cycles={}, warnings=warnings)
 
-    if ftype == "GCD" and has_cycle_col:
-        if not cycle_values:
-            return CycleSplitResult(file_type=ftype, method="cycle_col", max_cycle=0, cycles={}, warnings=warnings)
+    if ftype == "GCD":
+        if not has_cycle_col or not cycle_values:
+            raise ValueError("E9007: missing Cycle column for GCD")
         max_cycle = max(cycle_values)
         cycles: dict[int, list[int]] = {}
         for i, cyc in enumerate(cycle_values):
@@ -94,10 +94,7 @@ def split_cycles(
             start = 0
         else:
             start = end_idx[k - 1] + 1
-        if k_end < start:
-            cycles[k] = []
-        else:
-            cycles[k] = list(range(start, k_end + 1))
+        cycles[k] = [] if k_end < start else list(range(start, k_end + 1))
 
     if max_cycle == n_max + 1:
         tail_start = end_idx[n_max] + 1

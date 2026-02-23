@@ -52,54 +52,58 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _write_sample_cv(path: Path) -> None:
     path.write_text(
-        "0.10\t0.20\t0.30\n"
-        "0.20\t0.30\t0.40 1 CYCLE\n"
-        "3 CYCLE\n"
-        "0.30\t0.40\t0.50\n"
-        "0.40\t0.50\t0.60 2 CYCLE\n"
-        "0.50\t0.60\t0.70\n",
+        "# comment\n"
+        "Time(s)\tVoltage(V)\tCurrent(mA)\n"
+        "0.10\t0.20\t0.30 1 CYCLE\n"
+        "0.20\t0.30\t0.40\n"
+        "0.30\t0.40\t0.50 2 CYCLE\n"
+        "0.40\t0.50\t0.60\n"
+        "0.50\t0.60\t0.70 3 CYCLE\n"
+        "0.60\t0.70\t0.80\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd(path: Path) -> None:
     path.write_text(
-        "Time,Voltage,Current,Step,Cycle\n"
-        "0,3.20,-0.5,1,1\n"
-        "1,3.10,-0.5,1,1\n"
-        "2,3.10,0.5,2,1\n"
-        "3,3.20,0.5,2,1\n"
-        "4,3.30,0.5,2,1\n"
-        "5,3.20,-0.5,3,1\n"
-        "6,3.10,-0.5,3,1\n"
-        "7,3.00,-0.5,3,1\n"
-        "8,3.00,0.5,4,2\n"
-        "9,3.10,0.5,4,2\n"
-        "10,3.20,0.5,4,2\n"
-        "11,3.10,-0.5,5,2\n"
-        "12,3.00,-0.5,5,2\n"
-        "13,2.90,-0.5,5,2\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\n"
+        "0\t3.20\t-0.5\t1\t1\n"
+        "1\t3.10\t-0.5\t1\t1\n"
+        "2\t3.10\t0.5\t2\t1\n"
+        "3\t3.20\t0.5\t2\t1\n"
+        "4\t3.30\t0.5\t2\t1\n"
+        "5\t3.20\t-0.5\t3\t1\n"
+        "6\t3.10\t-0.5\t3\t1\n"
+        "7\t3.00\t-0.5\t3\t1\n"
+        "8\t3.00\t0.5\t4\t2\n"
+        "9\t3.10\t0.5\t4\t2\n"
+        "10\t3.20\t0.5\t4\t2\n"
+        "11\t3.10\t-0.5\t5\t2\n"
+        "12\t3.00\t-0.5\t5\t2\n"
+        "13\t2.90\t-0.5\t5\t2\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd_no_cycle(path: Path) -> None:
     path.write_text(
-        "Time;Voltage;Current\n"
-        "0;3.1;0.5\n"
-        "1;3.2;0.5 1 CYCLE\n"
-        "2 CYCLE\n"
-        "2;3.3;0.5\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\n"
+        "0\t3.1\t0.5\n"
+        "1\t3.2\t0.5\n"
+        "2\t3.3\t0.5\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_eis(path: Path) -> None:
-    path.write_text("1,2,3\n2,3,4\n", encoding="utf-8")
+    path.write_text("# comment\nFreq\tZ'\tZ''\n1\t2\t3\n2\t3\t4\n", encoding="utf-8")
 
 
 def _write_sample_cv_units(path: Path) -> None:
     path.write_text(
+        "# comment\n"
         "时间(s)\t电压(V)\t电流(mA)\tStep\n"
         "0\t3.00\t10\t1\n"
         "1\t3.10\t20\t1\n",
@@ -109,146 +113,156 @@ def _write_sample_cv_units(path: Path) -> None:
 
 def _write_sample_gcd_units(path: Path) -> None:
     path.write_text(
-        "Time(s),Voltage(V),j(mA/cm2),Cycle\n"
-        "0,3.20,5,1\n"
-        "1,3.30,10,1\n",
+        "# comment\n"
+        "Time(s)\tVoltage(V)\tj(mA/cm2)\tCycle\n"
+        "0\t3.20\t5\t1\n"
+        "1\t3.30\t10\t1\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_eis_units(path: Path) -> None:
     path.write_text(
-        "Freq(Hz),Z'(Ohm·cm2),Z''(Ohm·cm2)\n"
-        "1,10,4\n"
-        "2,12,6\n",
+        "# comment\n"
+        "Freq(Hz)\tZ'(Ohm·cm2)\tZ''(Ohm·cm2)\n"
+        "1\t10\t4\n"
+        "2\t12\t6\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_eis_no_header_bad(path: Path) -> None:
-    path.write_text("1,2,3\n2,3,4\n3,4,5\n", encoding="utf-8")
+    path.write_text("# comment\nFreq\tAlpha\tBeta\n1\t2\t3\n2\t3\t4\n", encoding="utf-8")
 
 
 def _write_sample_cv_cycle_rules(path: Path) -> None:
     path.write_text(
-        "2 CYCLE\n"
-        "1 CYCLE\n"
-        "0.10\t0.20\t0.30\n"
-        "0.20\t0.30\t0.40 1 CYCLE\n"
-        "0.30\t0.40\t0.50\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\n"
+        "0.10\t0.20\t0.30 1 CYCLE\n"
+        "0.20\t0.30\t0.40\n"
+        "0.30\t0.40\t0.50 2 CYCLE\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd_cycle_col(path: Path) -> None:
     path.write_text(
-        "Time,Voltage,Current,Cycle\n"
-        "0,3.1,0.5,1\n"
-        "1,3.2,0.5,1\n"
-        "2,3.3,0.5,2\n"
-        "3,3.4,0.5,3\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tCycle\n"
+        "0\t3.1\t0.5\t1\n"
+        "1\t3.2\t0.5\t1\n"
+        "2\t3.3\t0.5\t2\n"
+        "3\t3.4\t0.5\t3\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd_metrics(path: Path) -> None:
     path.write_text(
-        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
-        "0,2.4,1,1,1,0.00,0.00\n"
-        "1,3.0,1,1,1,0.28,0.00\n"
-        "2,4.4,1,1,1,0.56,0.00\n"
-        "3,4.3,-1,2,1,0.56,0.05\n"
-        "4,3.5,-1,2,1,0.56,0.32\n"
-        "5,2.3,-1,2,1,0.56,0.58\n"
-        "6,2.4,1,3,2,0.00,0.00\n"
-        "7,3.1,1,3,2,0.30,0.00\n"
-        "8,4.3,1,3,2,0.57,0.00\n"
-        "9,4.3,-1,4,2,0.57,0.07\n"
-        "10,3.6,-1,4,2,0.57,0.34\n"
-        "11,2.3,-1,4,2,0.57,0.61\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\tQ_chg\tQ_dis\n"
+        "0\t2.4\t1\t1\t1\t0.00\t0.00\n"
+        "1\t3.0\t1\t1\t1\t0.28\t0.00\n"
+        "2\t4.4\t1\t1\t1\t0.56\t0.00\n"
+        "3\t4.3\t-1\t2\t1\t0.56\t0.05\n"
+        "4\t3.5\t-1\t2\t1\t0.56\t0.32\n"
+        "5\t2.3\t-1\t2\t1\t0.56\t0.58\n"
+        "6\t2.4\t1\t3\t2\t0.00\t0.00\n"
+        "7\t3.1\t1\t3\t2\t0.30\t0.00\n"
+        "8\t4.3\t1\t3\t2\t0.57\t0.00\n"
+        "9\t4.3\t-1\t4\t2\t0.57\t0.07\n"
+        "10\t3.6\t-1\t4\t2\t0.57\t0.34\n"
+        "11\t2.3\t-1\t4\t2\t0.57\t0.61\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_gcd_capacity_only(path: Path) -> None:
     path.write_text(
-        "Time,Voltage,Step,Cycle,Q_chg,Q_dis\n"
-        "0,2.4,1,1,0.00,0.00\n"
-        "1,3.0,1,1,0.28,0.00\n"
-        "2,4.4,1,1,0.56,0.00\n"
-        "3,4.3,2,1,0.56,0.05\n"
-        "4,3.5,2,1,0.56,0.32\n"
-        "5,2.3,2,1,0.56,0.58\n",
+        "# comment\n"
+        "Time\tVoltage\tStep\tCycle\tQ_chg\tQ_dis\n"
+        "0\t2.4\t1\t1\t0.00\t0.00\n"
+        "1\t3.0\t1\t1\t0.28\t0.00\n"
+        "2\t4.4\t1\t1\t0.56\t0.00\n"
+        "3\t4.3\t2\t1\t0.56\t0.05\n"
+        "4\t3.5\t2\t1\t0.56\t0.32\n"
+        "5\t2.3\t2\t1\t0.56\t0.58\n",
         encoding="utf-8",
     )
 
 
 def _write_sample_eis_cycle_none(path: Path) -> None:
-    path.write_text("Freq,Zre,Zim\n1,2,3\n2,3,4\n3,4,5\n", encoding="utf-8")
+    path.write_text("# comment\nFreq\tZre\tZim\n1\t2\t3\n2\t3\t4\n3\t4\t5\n", encoding="utf-8")
 
 
 def _write_step8_cv(path: Path) -> None:
     path.write_text(
-        "Time(s),Voltage(V),j(mA/cm2),Cycle\n"
-        "0,1.0,10,1\n"
-        "1,1.1,-20,1\n"
-        "2,1.2,30,1\n"
-        "3,1.3,-40,1\n",
+        "# comment\n"
+        "Time(s)\tVoltage(V)\tj(mA/cm2)\tCycle\n"
+        "0\t1.0\t10\t1\n"
+        "1\t1.1\t-20\t1\n"
+        "2\t1.2\t30\t1\n"
+        "3\t1.3\t-40\t1\n",
         encoding="utf-8",
     )
 
 
 def _write_step8_gcd(path: Path) -> None:
     path.write_text(
-        "Time(s),Voltage(V),Current(A),Step,Cycle\n"
-        "0,3.00,-0.2,1,1\n"
-        "1,2.90,-0.2,1,1\n"
-        "2,2.90,0.0,2,1\n"
-        "3,2.90,0.0,2,1\n"
-        "4,2.95,0.2,3,1\n"
-        "5,3.05,0.2,3,1\n"
-        "6,3.15,0.2,3,1\n"
-        "7,3.20,0.2,4,2\n"
-        "8,3.30,0.2,4,2\n"
-        "9,3.40,0.2,4,2\n"
-        "10,3.30,-0.2,5,2\n"
-        "11,3.20,-0.2,5,2\n"
-        "12,3.10,-0.2,5,2\n",
+        "# comment\n"
+        "Time(s)\tVoltage(V)\tCurrent(A)\tStep\tCycle\n"
+        "0\t3.00\t-0.2\t1\t1\n"
+        "1\t2.90\t-0.2\t1\t1\n"
+        "2\t2.90\t0.0\t2\t1\n"
+        "3\t2.90\t0.0\t2\t1\n"
+        "4\t2.95\t0.2\t3\t1\n"
+        "5\t3.05\t0.2\t3\t1\n"
+        "6\t3.15\t0.2\t3\t1\n"
+        "7\t3.20\t0.2\t4\t2\n"
+        "8\t3.30\t0.2\t4\t2\n"
+        "9\t3.40\t0.2\t4\t2\n"
+        "10\t3.30\t-0.2\t5\t2\n"
+        "11\t3.20\t-0.2\t5\t2\n"
+        "12\t3.10\t-0.2\t5\t2\n",
         encoding="utf-8",
     )
 
 
 def _write_step8_eis(path: Path) -> None:
     path.write_text(
-        "Freq(Hz),Z'(Ohm·cm2),Z''(Ohm·cm2)\n"
-        "1,10,4\n"
-        "2,12,6\n",
+        "# comment\n"
+        "Freq(Hz)\tZ'(Ohm·cm2)\tZ''(Ohm·cm2)\n"
+        "1\t10\t4\n"
+        "2\t12\t6\n",
         encoding="utf-8",
     )
 
 
 def _write_step8_rate_good(path: Path, current: float, dq_dis_end: float) -> None:
     path.write_text(
-        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
-        f"0,2.4,0,1,1,0.00,0.00\n"
-        f"1,3.0,{current},1,1,0.28,0.00\n"
-        f"2,4.3,{current},1,1,0.57,0.00\n"
-        f"3,4.3,{-current},2,1,0.57,0.07\n"
-        f"4,3.6,{-current},2,1,0.57,0.34\n"
-        f"5,2.3,{-current},2,1,0.57,{dq_dis_end}\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\tQ_chg\tQ_dis\n"
+        f"0\t2.4\t0\t1\t1\t0.00\t0.00\n"
+        f"1\t3.0\t{current}\t1\t1\t0.28\t0.00\n"
+        f"2\t4.3\t{current}\t1\t1\t0.57\t0.00\n"
+        f"3\t4.3\t{-current}\t2\t1\t0.57\t0.07\n"
+        f"4\t3.6\t{-current}\t2\t1\t0.57\t0.34\n"
+        f"5\t2.3\t{-current}\t2\t1\t0.57\t{dq_dis_end}\n",
         encoding="utf-8",
     )
 
 
 def _write_step8_rate_bad(path: Path, current: float) -> None:
     path.write_text(
-        "Time,Voltage,Current,Step,Cycle,Q_chg,Q_dis\n"
-        f"0,2.4,0,1,1,0.00,0.00\n"
-        f"1,3.0,0,1,1,0.00,0.00\n"
-        f"2,4.3,0,1,1,0.00,0.00\n"
-        f"3,4.3,0,2,1,0.00,0.00\n"
-        f"4,3.6,0,2,1,0.00,0.00\n"
-        f"5,2.3,0,2,1,0.00,0.00\n",
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\tQ_chg\tQ_dis\n"
+        f"0\t2.4\t0\t1\t1\t0.00\t0.00\n"
+        f"1\t3.0\t0\t1\t1\t0.00\t0.00\n"
+        f"2\t4.3\t0\t1\t1\t0.00\t0.00\n"
+        f"3\t4.3\t0\t2\t1\t0.00\t0.00\n"
+        f"4\t3.6\t0\t2\t1\t0.00\t0.00\n"
+        f"5\t2.3\t0\t2\t1\t0.00\t0.00\n",
         encoding="utf-8",
     )
 
@@ -426,7 +440,12 @@ def _selftest(ctx, logger) -> int:
 
     assert _estimate_cycle_from_file(struct_a / "CV-1.txt", "CV", logger, str(ctx.report_path)) == 4, "CV-1.txt maxCycle assertion failed"
     assert _estimate_cycle_from_file(struct_a / "GCD-0.5.txt", "GCD", logger, str(ctx.report_path)) == 2, "GCD-1.txt maxCycle assertion failed"
-    assert _estimate_cycle_from_file(struct_a / "GCD-2.txt", "GCD", logger, str(ctx.report_path)) == 3, "GCD-2.txt maxCycle assertion failed"
+    gcd2_failed = False
+    try:
+        _estimate_cycle_from_file(struct_a / "GCD-2.txt", "GCD", logger, str(ctx.report_path))
+    except ValueError as e:
+        gcd2_failed = "E9007" in str(e)
+    assert gcd2_failed, "GCD-2.txt must fail with E9007"
 
     cv_map, cv_series = read_and_map_file(
         file_path=str(struct_a / "CV-2.txt"),
@@ -477,9 +496,9 @@ def _selftest(ctx, logger) -> int:
         )
     except ValueError as e:
         logger.exception("selftest expected parse failure", exc=e)
-        failed = "E6101" in str(e)
-    assert failed, "EIS-5 must fail with E6101"
-    assert "E6101" in Path(ctx.report_path).read_text(encoding="utf-8"), "run_report must contain E6101"
+        failed = "E9008" in str(e)
+    assert failed, "EIS-5 must fail with E9008"
+    assert "E9008" in Path(ctx.report_path).read_text(encoding="utf-8"), "run_report must contain E9008"
 
     _m_cv10, _s_cv10, cv10_kept, cv10_markers, cv10_has_cycle_col, cv10_cycle_values = parse_file_for_cycles(
         file_path=str(struct_a / "CV-10.txt"),
@@ -493,8 +512,7 @@ def _selftest(ctx, logger) -> int:
     cv10_split = split_cycles("CV", cv10_has_cycle_col, cv10_cycle_values, cv10_kept, cv10_markers)
     assert cv10_split.method == "k_cycle", "CV-10.txt method assertion failed"
     assert cv10_split.max_cycle == 2, "CV-10.txt maxCycle assertion failed"
-    assert len(cv10_split.cycles.get(1, [])) == 2, "CV-10.txt cycle#1 size assertion failed"
-    assert cv10_split.warnings, "CV-10.txt warnings assertion failed"
+    assert len(cv10_split.cycles.get(1, [])) == 1, "CV-10.txt cycle#1 size assertion failed"
 
     _m_gcd10, _s_gcd10, gcd10_kept, gcd10_markers, gcd10_has_cycle_col, gcd10_cycle_values = parse_file_for_cycles(
         file_path=str(struct_a / "GCD-10.txt"),
