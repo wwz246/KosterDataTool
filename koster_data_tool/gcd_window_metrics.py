@@ -121,6 +121,19 @@ def _find_bracket_in_global(global_E: list[float], center_global_idx: int, targe
     return candidates[0]
 
 
+def _pick_edge_pair_for_extrapolation(global_t: list[float], global_E: list[float], center_global_idx: int, side: str) -> int | None:
+    if len(global_t) < 2 or len(global_E) < 2:
+        return None
+    if side == "head":
+        search_range = range(max(0, center_global_idx), min(len(global_E) - 1, center_global_idx + 6))
+    else:
+        search_range = range(max(0, center_global_idx - 5), min(len(global_E) - 1, center_global_idx + 1))
+    for i in search_range:
+        if abs(global_E[i + 1] - global_E[i]) > 1e-15 and global_t[i + 1] != global_t[i]:
+            return i
+    return None
+
+
 def _local_index_by_global_pair(seg_global_indices: list[int], g_pair: int) -> int | None:
     for i in range(len(seg_global_indices) - 1):
         if seg_global_indices[i] == g_pair and seg_global_indices[i + 1] == g_pair + 1:
@@ -158,7 +171,10 @@ def clip_segment_by_voltage_window(
         g_center_start = seg_global_indices[0]
         start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
         if start_global_pair is None:
-            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+            start_global_pair = _pick_edge_pair_for_extrapolation(global_t, global_E, g_center_start, "head")
+            if start_global_pair is None:
+                return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败: 起点无足够点插值/外推"])
+            warnings.append("电压窗边界使用线性外推(起点)")
         start_i_local = _local_index_by_global_pair(seg_global_indices, start_global_pair)
         start_uses_global = True
 
@@ -177,7 +193,10 @@ def clip_segment_by_voltage_window(
         g_center_end = seg_global_indices[-1]
         end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
         if end_global_pair is None:
-            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+            end_global_pair = _pick_edge_pair_for_extrapolation(global_t, global_E, g_center_end, "tail")
+            if end_global_pair is None:
+                return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败: 终点无足够点插值/外推"])
+            warnings.append("电压窗边界使用线性外推(终点)")
         end_i_local = _local_index_by_global_pair(seg_global_indices, end_global_pair)
         end_uses_global = True
 
@@ -217,12 +236,12 @@ def clip_segment_by_voltage_window(
             assert end_i_local is not None
             et, ee, ei, eq = _interp_pair(end_i_local, end_target, t, E, I, Q)
     except ValueError:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败: 数据异常(插值分母为0)"])
 
     start_loop_idx = 0 if start_i_local is None else (start_i_local + 1)
     end_loop_idx = (len(t) - 1) if end_i_local is None else end_i_local
     if et <= st + 1e-15 or end_loop_idx < start_loop_idx - 1:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败: 数据异常(时间或边界顺序)"])
 
     _push(st, se, si, sq)
     for i in range(start_loop_idx, end_loop_idx + 1):
@@ -230,7 +249,7 @@ def clip_segment_by_voltage_window(
     _push(et, ee, ei, eq)
 
     if len(w_t) < 2:
-        warnings.append("电压窗截取失败")
+        warnings.append("电压窗截取失败: 有效点不足")
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, warnings)
     return WindowTrace(w_t, w_E, w_I, w_Q, True, True, warnings)
 

@@ -45,6 +45,7 @@ class App:
         self.root_path_var = tk.StringVar(value="未选择")
 
         self.output_type_var = tk.StringVar(value="Csp")
+        self.electrode_rate_csp_col_var = tk.StringVar(value="csp_noir")
         self.a_geom_var = tk.StringVar(value="1")
         self.export_book_var = tk.BooleanVar(value=True)
         self.open_folder_var = tk.BooleanVar(value=True)
@@ -123,6 +124,11 @@ class App:
         ttk.Label(options, text="输出类型").grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(options, text="Csp", variable=self.output_type_var, value="Csp", command=self._on_output_type_change).grid(row=0, column=1, sticky="w")
         ttk.Radiobutton(options, text="Qsp", variable=self.output_type_var, value="Qsp", command=self._on_output_type_change).grid(row=0, column=2, sticky="w")
+        self.electrode_rate_col_frame = ttk.Frame(options)
+        self.electrode_rate_col_frame.grid(row=0, column=4, padx=(16, 0), sticky="w")
+        ttk.Label(self.electrode_rate_col_frame, text="极片级 Rate(Csp) 输出列").pack(side="left")
+        ttk.Radiobutton(self.electrode_rate_col_frame, text="比电容扣电压", variable=self.electrode_rate_csp_col_var, value="csp_eff").pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(self.electrode_rate_col_frame, text="比电容不扣电压", variable=self.electrode_rate_csp_col_var, value="csp_noir").pack(side="left", padx=(6, 0))
         ttk.Label(options, text="A_geom").grid(row=1, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.a_geom_var, width=10).grid(row=1, column=1, sticky="w")
         ttk.Checkbutton(options, text="是否输出电池级工作簿", variable=self.export_book_var).grid(row=2, column=0, columnspan=2, sticky="w")
@@ -211,6 +217,11 @@ class App:
         if self.output_type_var.get() == "Qsp":
             for row in self.param_table.rows:
                 row["k"] = 1
+            self.electrode_rate_col_frame.grid_remove()
+        else:
+            if self.electrode_rate_csp_col_var.get() not in {"csp_noir", "csp_eff"}:
+                self.electrode_rate_csp_col_var.set("csp_noir")
+            self.electrode_rate_col_frame.grid()
         self.param_table.set_columns(self._build_table_columns())
         self._refresh_error_states()
 
@@ -459,7 +470,13 @@ class App:
         return {}, None
 
     def _collect_params(self):
-        out = {"a_geom": float(self.a_geom_var.get()), "output_type": self.output_type_var.get(), "export_battery_workbook": bool(self.export_book_var.get()), "battery_params": {}}
+        out = {
+            "a_geom": float(self.a_geom_var.get()),
+            "output_type": self.output_type_var.get(),
+            "export_battery_workbook": bool(self.export_book_var.get()),
+            "electrode_rate_csp_column": self.electrode_rate_csp_col_var.get() if self.output_type_var.get() == "Csp" else None,
+            "battery_params": {},
+        }
         first_error = None
         if self.param_table is None:
             return out
@@ -512,6 +529,9 @@ class App:
         if not cur:
             return
         vals = cur.get("rows", [])
+        col_choice = cur.get("electrode_rate_csp_column")
+        if col_choice in {"csp_noir", "csp_eff"}:
+            self.electrode_rate_csp_col_var.set(col_choice)
         if self.param_table is None:
             return
         for row_idx, row in enumerate(vals):
@@ -529,7 +549,10 @@ class App:
         if cp.exists():
             obj = json.loads(cp.read_text(encoding="utf-8"))
         rows = self.param_table.rows if self.param_table is not None else []
-        obj[str(self.selected_root)] = {"rows": rows}
+        obj[str(self.selected_root)] = {
+            "rows": rows,
+            "electrode_rate_csp_column": self.electrode_rate_csp_col_var.get(),
+        }
         cp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _clear_cache(self):

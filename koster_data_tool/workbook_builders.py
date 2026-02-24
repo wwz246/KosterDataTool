@@ -57,7 +57,7 @@ def _apply_param_cycle_formats(ws, start_row: int, end_row: int) -> None:
         for c in (6, 7):
             ws.cell(row=r, column=c).number_format = INT_FMT
 
-def _build_rate_retention_blocks(battery, params, logger, run_report_path: str):
+def _build_rate_retention_blocks(battery, params, logger, run_report_path: str, compact_rate_columns: bool):
     bparam = params["battery_params"].get(battery.name, {})
     root_params = {
         "a_geom": params.get("a_geom", 1.0),
@@ -73,6 +73,8 @@ def _build_rate_retention_blocks(battery, params, logger, run_report_path: str):
         battery_params=bparam,
         logger=logger,
         run_report_path=run_report_path,
+        csp_column_choice=params.get("electrode_rate_csp_column"),
+        compact_rate_columns=compact_rate_columns,
     )
 
 
@@ -87,7 +89,7 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
     end_row = 1
     for b in selected_bats:
         try:
-            rr = _build_rate_retention_blocks(b, params, logger, run_report_path)
+            rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=True)
             if len(rr.rate.h3) >= 2:
                 rr.rate.h3[0] = ""
                 for i in range(1, len(rr.rate.h3)):
@@ -98,22 +100,6 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
         ec, er = write_block(ws, col, 1, rr.rate)
         col = ec
         end_row = max(end_row, er)
-
-    row2 = end_row + 2
-    col = 1
-    for b in selected_bats:
-        try:
-            rr = _build_rate_retention_blocks(b, params, logger, run_report_path)
-        except Exception as exc:
-            _record_failure(run_report_path, logger, b.name, exc)
-            rr = type("Tmp", (), {"rate": _empty_curve_block(), "retention": _empty_curve_block()})()
-        retention = copy.deepcopy(rr.retention)
-        if len(retention.h3) >= 2:
-            retention.h3[0] = ""
-            for i in range(1, len(retention.h3)):
-                retention.h3[i] = b.name
-        write_block(ws, col, row2, retention)
-        col += len(retention.h1)
 
     for n in selections.get("cv_nums", []):
         ws_cv = wb.create_sheet(f"CV-{n}")
@@ -280,7 +266,7 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
         col = blank_col_after(ws, col)
 
         try:
-            rr = _build_rate_retention_blocks(b, params, logger, run_report_path)
+            rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=False)
         except Exception as exc:
             _record_failure(run_report_path, logger, b.name, exc)
             rr = type("Tmp", (), {"rate": _empty_curve_block(), "retention": _empty_curve_block()})()
