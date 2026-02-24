@@ -191,6 +191,8 @@ def _build_param_summary_sheet(wb: Workbook, scan_result, params, logger, run_re
                 _record_failure(run_report_path, logger, g.path, exc)
                 gm = type("Tmp", (), {"cycles": {}})()
             for k in range(1, int(b.gcd_max_cycle or 0) + 1):
+                if k == 1:
+                    continue
                 rep = gm.cycles.get(k)
                 m_active_g = max(1e-12, (float(bp.get("m_pos", 0.0)) + float(bp.get("m_neg", 0.0))) * float(bp.get("p_active", 100.0)) / 100000.0)
                 if rep is None:
