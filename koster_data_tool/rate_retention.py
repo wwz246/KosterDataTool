@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,21 @@ def _calc_csp(delta_q_mAh: float | None, delta_v: float | None, m_active_g: floa
     return (delta_q_mAh * 3.6) / (delta_v * m_active_g) * k_factor
 
 
+def _round_half_up(value: float, ndigits: int) -> float:
+    q = Decimal("1") if ndigits == 0 else Decimal("1." + ("0" * ndigits))
+    return float(Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP))
+
+
+def _round_metric_by_semantic(metric_key: str, value: float) -> float:
+    if not math.isfinite(value):
+        return value
+    if metric_key in {"csp_noir", "csp_eff"}:
+        return _round_half_up(value, 0)
+    if metric_key in {"qsp", "r_drop", "r_turn"}:
+        return _round_half_up(value, 2)
+    return value
+
+
 def build_rate_and_retention_for_battery(
     gcd_files: list[str],
     n_gcd: int,
@@ -40,6 +56,8 @@ def build_rate_and_retention_for_battery(
     battery_params: dict,
     logger,
     run_report_path: str,
+    csp_column_choice: str | None = None,
+    compact_rate_columns: bool = False,
 ) -> RateBlock:
     rows = sorted(gcd_files, key=_gcd_label)
     m_active_g = calc_m_active_g(float(battery_params.get("m_pos", 0.0)), float(battery_params.get("m_neg", 0.0)), float(battery_params.get("p_active", 100.0)))
@@ -69,6 +87,7 @@ def build_rate_and_retention_for_battery(
         h3 = ["", ""]
 
     metric_cols: list[list[float]] = [[] for _ in range(len(out_cols) - 1)]
+    metric_keys = ["csp_noir", "csp_eff", "r_drop", "r_turn"] if output_type == "Csp" else ["qsp"]
 
     for fp in rows:
         result = compute_gcd_file_metrics(
@@ -110,25 +129,45 @@ def build_rate_and_retention_for_battery(
             vals = [qsp_dis]
 
         for i, v in enumerate(vals, start=1):
-            out_cols[i].append(v)
-            metric_cols[i - 1].append(v)
-
-    retention_cols: list[list[float]] = [list(out_cols[0])] + [[] for _ in metric_cols]
-    for ci, col in enumerate(metric_cols, start=1):
-        if not col:
-            retention_cols[ci] = []
-            continue
-        x0 = col[0]
-        x1 = col[-1]
-        if math.isnan(x0) or x0 <= 0:
-            msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0，整列NA")
-            logger.warning(msg, code="W1304")
-            warnings.append(msg)
-            retention_cols[ci] = ["NA" for _ in col]
+            rounded_v = _round_metric_by_semantic(metric_keys[i - 1], v)
+            out_cols[i].append(rounded_v)
+            metric_cols[i - 1].append(rounded_v)
+    if compact_rate_columns and output_type == "Csp":
+        chosen = csp_column_choice if csp_column_choice in {"csp_noir", "csp_eff"} else "csp_noir"
+        chosen_idx = 1 if chosen == "csp_noir" else 2
+        out_cols = [out_cols[0], out_cols[chosen_idx]]
+        metric_cols = [metric_cols[chosen_idx - 1]]
+        if chosen == "csp_noir":
+            h1 = ["Current density", "Specific capacitance (noIR)"]
+            h2 = ["A/g", "F/g"]
+            h3 = ["", "不扣IR"]
         else:
-            value = 100.0 * x1 / x0
-            retention_cols[ci] = [value for _ in col]
+            h1 = ["Current density", "Specific capacitance (eff)"]
+            h2 = ["A/g", "F/g"]
+            h3 = ["", "有效值"]
+
+    retention_cols: list[list[float | str]] = [["保持率"]] + [[""] for _ in metric_cols]
+    target_ci = 1
+    if metric_cols:
+        col = metric_cols[0]
+        if col:
+            x0 = col[0]
+            x1 = col[-1]
+            if math.isnan(x0) or x0 <= 0:
+                msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0")
+                logger.warning(msg, code="W1304")
+                warnings.append(msg)
+                retention_cols[target_ci] = ["NA"]
+            else:
+                value = _round_half_up(100.0 * x1 / x0, 2)
+                retention_cols[target_ci] = [f"{value:.2f}%"]
+        else:
+            retention_cols[target_ci] = [""]
+
+    for ci in range(len(out_cols)):
+        row_v = retention_cols[ci][0] if ci < len(retention_cols) and retention_cols[ci] else ""
+        out_cols[ci].append(row_v)
 
     rate_block = Block3Header(h1=h1, h2=h2, h3=h3, data=out_cols, warnings=warnings)
-    retention_block = Block3Header(h1=h1, h2=["%" if i > 0 else u for i, u in enumerate(h2)], h3=h3, data=retention_cols, warnings=warnings)
+    retention_block = Block3Header(h1=[], h2=[], h3=[], data=[], warnings=warnings)
     return RateBlock(rate=rate_block, retention=retention_block, warnings=warnings)
