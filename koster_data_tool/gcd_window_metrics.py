@@ -73,47 +73,48 @@ class GcdConditionMetrics:
 
 def _interp_pair(i: int, target_v: float, t: list[float], E: list[float], I: list[float] | None, Q: list[float] | None) -> tuple[float, float, float | None, float | None]:
     e0, e1 = E[i], E[i + 1]
-    if abs(e1 - e0) < 1e-15:
-        alpha = 0.0
-    else:
-        alpha = (target_v - e0) / (e1 - e0)
-    alpha = max(0.0, min(1.0, alpha))
+    de = e1 - e0
+    if abs(de) < 1e-15:
+        raise ValueError("电压窗截取失败: 插值分母为0")
+    alpha = (target_v - e0) / de
     t0 = t[i] + alpha * (t[i + 1] - t[i])
     ii = None if I is None else I[i] + alpha * (I[i + 1] - I[i])
     qq = None if Q is None else Q[i] + alpha * (Q[i + 1] - Q[i])
     return t0, target_v, ii, qq
 
 
-def _find_event_indices(E: list[float], target: float, upward: bool) -> list[tuple[str, int]]:
+def _crosses(a: float, b: float, target: float, upward: bool) -> bool:
     eps = 1e-12
-    out: list[tuple[str, int]] = []
-    for i, v in enumerate(E):
-        if abs(v - target) <= eps:
-            out.append(("point", i))
+    if upward:
+        return (a <= target <= b + eps) or (abs(a - target) <= eps) or (abs(b - target) <= eps)
+    return (b - eps <= target <= a) or (abs(a - target) <= eps) or (abs(b - target) <= eps)
+
+
+def _find_event_indices(E: list[float], target: float, upward: bool) -> list[int]:
+    out: list[int] = []
     for i in range(len(E) - 1):
-        a, b = E[i], E[i + 1]
-        if upward and (a < target < b or abs(a - target) <= eps and b > target or a < target and abs(b - target) <= eps):
-            out.append(("cross", i))
-        if (not upward) and (a > target > b or abs(a - target) <= eps and b < target or a > target and abs(b - target) <= eps):
-            out.append(("cross", i))
+        if _crosses(E[i], E[i + 1], target, upward):
+            out.append(i)
     return out
 
 
 def _find_bracket_in_global(global_E: list[float], center_global_idx: int, target: float, upward: bool) -> int | None:
+    if len(global_E) < 2:
+        return None
     lo = max(0, center_global_idx - 5)
     hi = min(len(global_E) - 2, center_global_idx + 5)
-    cand: list[tuple[int, int]] = []
-    eps = 1e-12
-    for i in range(lo, hi + 1):
-        a, b = global_E[i], global_E[i + 1]
-        if upward and (a <= target <= b + eps and b >= a):
-            cand.append((abs(i - center_global_idx), i))
-        if (not upward) and (b - eps <= target <= a and a >= b):
-            cand.append((abs(i - center_global_idx), i))
-    if not cand:
+    candidates = [i for i in range(lo, hi + 1) if _crosses(global_E[i], global_E[i + 1], target, upward)]
+    if not candidates:
         return None
-    cand.sort()
-    return cand[0][1]
+    candidates.sort(key=lambda i: (abs(i - center_global_idx), i))
+    return candidates[0]
+
+
+def _local_index_by_global_pair(seg_global_indices: list[int], g_pair: int) -> int | None:
+    for i in range(len(seg_global_indices) - 1):
+        if seg_global_indices[i] == g_pair and seg_global_indices[i + 1] == g_pair + 1:
+            return i
+    return None
 
 
 def clip_segment_by_voltage_window(
@@ -123,31 +124,42 @@ def clip_segment_by_voltage_window(
     global_t: list[float], global_E: list[float], global_I: list[float] | None,
     seg_global_indices: list[int]
 ) -> WindowTrace:
+    del global_t, global_I
     warnings: list[str] = []
     if len(t) < 2 or len(E) < 2 or v_start >= v_end:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
 
     if direction == "charge":
-        start_events = _find_event_indices(E, v_start, upward=True)
-        end_events = _find_event_indices(E, v_end, upward=True)
+        start_target, end_target = v_start, v_end
+        upward_start, upward_end = True, True
+        start_pick, end_pick = "last", "first"
     else:
-        start_events = _find_event_indices(E, v_end, upward=False)
-        end_events = _find_event_indices(E, v_start, upward=False)
+        start_target, end_target = v_end, v_start
+        upward_start, upward_end = False, False
+        start_pick, end_pick = "last", "first"
+
+    start_events = _find_event_indices(E, start_target, upward=upward_start)
     if not start_events:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-
-    start_type, start_i = start_events[-1]
-    start_pos = float(start_i)
-    filtered_end = [(tp, i) for tp, i in end_events if i >= start_i]
-    if not filtered_end:
+    start_i_hint = start_events[-1] if start_pick == "last" else start_events[0]
+    g_center_start = seg_global_indices[min(start_i_hint, len(seg_global_indices) - 2)]
+    start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
+    if start_global_pair is None:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-    end_type, end_i = filtered_end[0]
-    end_pos = float(end_i)
-    if start_type == "cross":
-        start_pos = start_i + 0.5
-    if end_type == "cross":
-        end_pos = end_i + 0.5
-    if end_pos <= start_pos:
+    start_i = _local_index_by_global_pair(seg_global_indices, start_global_pair)
+    if start_i is None:
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+
+    end_events = [i for i in _find_event_indices(E, end_target, upward=upward_end) if i >= start_i]
+    if not end_events:
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+    end_i_hint = end_events[0] if end_pick == "first" else end_events[-1]
+    g_center_end = seg_global_indices[min(end_i_hint, len(seg_global_indices) - 2)]
+    end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
+    if end_global_pair is None:
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+    end_i = _local_index_by_global_pair(seg_global_indices, end_global_pair)
+    if end_i is None or end_i < start_i:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
 
     w_t: list[float] = []
@@ -165,45 +177,21 @@ def clip_segment_by_voltage_window(
         if w_Q is not None:
             w_Q.append(0.0 if pt_q is None else pt_q)
 
-    if direction == "charge":
-        s_target, e_target, s_up, e_up = v_start, v_end, True, True
-    else:
-        s_target, e_target, s_up, e_up = v_end, v_start, False, False
+    try:
+        st, se, si, sq = _interp_pair(start_i, start_target, t, E, I, Q)
+        et, ee, ei, eq = _interp_pair(end_i, end_target, t, E, I, Q)
+    except ValueError:
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
 
-    if start_type == "point":
-        _push(t[start_i], E[start_i], None if I is None else I[start_i], None if Q is None else Q[start_i])
-        start_interp = False
-    else:
-        g_center = seg_global_indices[min(start_i, len(seg_global_indices) - 1)]
-        g_pair = _find_bracket_in_global(global_E, g_center, s_target, s_up)
-        if g_pair is None:
-            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-        loc_i = start_i
-        st, se, si, sq = _interp_pair(loc_i, s_target, t, E, I, Q)
-        _push(st, se, si, sq)
-        start_interp = True
-
-    for i in range(len(t)):
-        if i > start_pos and i < end_pos:
-            _push(t[i], E[i], None if I is None else I[i], None if Q is None else Q[i])
-
-    if end_type == "point":
-        _push(t[end_i], E[end_i], None if I is None else I[end_i], None if Q is None else Q[end_i])
-        end_interp = False
-    else:
-        g_center = seg_global_indices[min(end_i, len(seg_global_indices) - 1)]
-        g_pair = _find_bracket_in_global(global_E, g_center, e_target, e_up)
-        if g_pair is None:
-            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-        loc_i = end_i
-        et, ee, ei, eq = _interp_pair(loc_i, e_target, t, E, I, Q)
-        _push(et, ee, ei, eq)
-        end_interp = True
+    _push(st, se, si, sq)
+    for i in range(start_i + 1, end_i + 1):
+        _push(t[i], E[i], None if I is None else I[i], None if Q is None else Q[i])
+    _push(et, ee, ei, eq)
 
     if len(w_t) < 2:
         warnings.append("电压窗截取失败")
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, warnings)
-    return WindowTrace(w_t, w_E, w_I, w_Q, start_interp, end_interp, warnings)
+    return WindowTrace(w_t, w_E, w_I, w_Q, True, True, warnings)
 
 
 def _integrate_mAh(t: list[float], I: list[float], start_interval: int = 0) -> float:
@@ -492,10 +480,30 @@ def compute_gcd_file_metrics(
         cycles[k] = cm
         if any("E5102" in w for w in cm.warnings):
             fatal_error = f"E5102 缺电流且缺容量列，ΔQ 无法计算 file_path={file_path} n_gcd={n_gcd}"
+        if not cm.ok_window and k != n_gcd:
+            line = report_warning(
+                run_report_path,
+                "W5204",
+                "电压窗截取失败",
+                file_path=file_path,
+                cycle=k,
+                V_start=v_start,
+                V_end=v_end,
+            )
+            file_warnings.append(line)
+            logger.warning(line, code="W5204", file_path=file_path, cycle=k, V_start=v_start, V_end=v_end)
 
     rep_ok = bool(cycles.get(n_gcd) and cycles[n_gcd].ok_window)
     if not rep_ok:
-        fatal_error = report_error(run_report_path, "E5201", "选定圈无法按电压窗截取", file_path=file_path, n_gcd=n_gcd)
-        logger.error(fatal_error, code="E5201", file_path=file_path, n_gcd=n_gcd)
+        fatal_error = report_error(
+            run_report_path,
+            "E5201",
+            "选定圈无法按电压窗截取",
+            file_path=file_path,
+            cycle=n_gcd,
+            V_start=v_start,
+            V_end=v_end,
+        )
+        logger.error(fatal_error, code="E5201", file_path=file_path, cycle=n_gcd, V_start=v_start, V_end=v_end)
 
     return GcdConditionMetrics(file_path=file_path, j_label=j_label, main_order=main_order, n_gcd=n_gcd, representative_cycle_ok=rep_ok, cycles=cycles, fatal_error=fatal_error, warnings=file_warnings)

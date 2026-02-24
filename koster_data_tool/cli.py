@@ -192,6 +192,58 @@ def _write_sample_gcd_capacity_only(path: Path) -> None:
     )
 
 
+
+
+def _write_sample_gcd_window_nonrep_fail(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\n"
+        "0\t2.4\t1.0\t1\t1\n"
+        "1\t3.0\t1.0\t1\t1\n"
+        "2\t4.4\t1.0\t1\t1\n"
+        "3\t4.3\t-1.0\t2\t1\n"
+        "4\t3.5\t-1.0\t2\t1\n"
+        "5\t2.3\t-1.0\t2\t1\n"
+        "6\t2.4\t1.0\t3\t2\n"
+        "7\t3.1\t1.0\t3\t2\n"
+        "8\t4.1\t1.0\t3\t2\n"
+        "9\t4.1\t-1.0\t4\t2\n"
+        "10\t3.6\t-1.0\t4\t2\n"
+        "11\t2.3\t-1.0\t4\t2\n",
+        encoding="utf-8",
+    )
+
+
+def _write_sample_gcd_window_rep_fail(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\n"
+        "0\t2.4\t0.5\t1\t1\n"
+        "1\t3.2\t0.5\t1\t1\n"
+        "2\t4.3\t0.5\t1\t1\n"
+        "3\t3.9\t-0.5\t2\t1\n"
+        "4\t3.3\t-0.5\t2\t1\n"
+        "5\t2.4\t-0.5\t2\t1\n"
+        "6\t2.6\t0.5\t3\t2\n"
+        "7\t2.9\t0.5\t3\t2\n"
+        "8\t3.1\t0.5\t3\t2\n"
+        "9\t3.1\t-0.5\t4\t2\n"
+        "10\t2.9\t-0.5\t4\t2\n"
+        "11\t2.6\t-0.5\t4\t2\n",
+        encoding="utf-8",
+    )
+
+
+def _write_sample_eis_with_string_col(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Freq\tZ'\tZ''\tRange\n"
+        "1\t2\t3\t20mA\n"
+        "2\t3\t4\t20mA\n",
+        encoding="utf-8",
+    )
+
+
 def _write_sample_eis_cycle_none(path: Path) -> None:
     path.write_text("# comment\nFreq\tZre\tZim\n1\t2\t3\n2\t3\t4\n3\t4\t5\n", encoding="utf-8")
 
@@ -285,7 +337,9 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_cv_cycle_rules(struct_a / "CV-10.txt")
     _write_sample_gcd_cycle_col(struct_a / "GCD-10.txt")
     _write_sample_eis_cycle_none(struct_a / "EIS-10.txt")
+    _write_sample_eis_with_string_col(struct_a / "EIS-11.txt")
     _write_sample_gcd_metrics(struct_a / "GCD-1.txt")
+    _write_sample_gcd_window_nonrep_fail(struct_a / "GCD-11.txt")
     _write_sample_gcd_capacity_only(struct_a / "GCD-4.txt")
 
     step8_root = base_root / "step8"
@@ -483,6 +537,17 @@ def _selftest(ctx, logger) -> int:
     )
     assert abs(eis_series["Zre"][0] - 5.0) < 1e-12 and abs(eis_series["Zim"][1] - 3.0) < 1e-12, "EIS-4 area normalization failed"
 
+    _, eis11_series = read_and_map_file(
+        file_path=str(struct_a / "EIS-11.txt"),
+        file_type="EIS",
+        a_geom_cm2=1.0,
+        v_start=None,
+        v_end=None,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert abs(eis11_series["Zre"][0] - 2.0) < 1e-12 and abs(eis11_series["Zim"][1] - 4.0) < 1e-12, "EIS-11 string column should be ignored"
+
     failed = False
     try:
         read_and_map_file(
@@ -609,7 +674,7 @@ def _selftest(ctx, logger) -> int:
         logger=logger,
         run_report_path=str(ctx.report_path),
     )
-    assert metrics.fatal_error != "E5201:代表圈电压窗截取失败", "代表圈不得触发 E5201"
+    assert metrics.fatal_error is None or "E5201" not in metrics.fatal_error, "代表圈不得触发 E5201"
     metrics_capacity = compute_gcd_file_metrics(
         file_path=str(struct_a / "GCD-4.txt"),
         root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
@@ -621,6 +686,27 @@ def _selftest(ctx, logger) -> int:
     ce_raw = 100 * (metrics.cycles[1].delta_q_dis / metrics.cycles[1].delta_q_chg)
     ce_rounded_proxy = 100 * (round(metrics.cycles[1].delta_q_dis, 2) / round(metrics.cycles[1].delta_q_chg, 2))
     assert abs(ce_raw - ce_rounded_proxy) > 1e-6, "CE 必须用未取整 ΔQ"
+
+    metrics_nonrep_fail = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-11.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics_nonrep_fail.fatal_error is None, "非选定圈截取失败不得触发 E5201"
+    assert metrics_nonrep_fail.cycles[2].ok_window is False, "GCD-11 cycle2 应窗口失败"
+    assert metrics_nonrep_fail.cycles[2].delta_q_chg is None and metrics_nonrep_fail.cycles[2].delta_q_dis is None, "窗口失败指标应为 NaN/None"
+    assert any("W5204" in w and "cycle=2" in w for w in metrics_nonrep_fail.warnings), "非选定圈失败应记录 W5204"
+
+    metrics_rep_fail = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-11.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 2},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics_rep_fail.fatal_error is not None and "E5201" in metrics_rep_fail.fatal_error, "选定圈截取失败应触发 E5201"
 
     result = scan_root(
         root_path=str(struct_b),
