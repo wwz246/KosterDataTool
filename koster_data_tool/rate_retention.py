@@ -146,27 +146,25 @@ def build_rate_and_retention_for_battery(
             h2 = ["A/g", "F/g"]
             h3 = ["", "有效值"]
 
-    retention_cols: list[list[float | str]] = [["保持率"]] + [[""] for _ in metric_cols]
-    target_ci = 1
-    if metric_cols:
-        col = metric_cols[0]
-        if col:
-            x0 = col[0]
-            x1 = col[-1]
-            if math.isnan(x0) or x0 <= 0:
-                msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0")
-                logger.warning(msg, code="W1304")
-                warnings.append(msg)
-                retention_cols[target_ci] = ["NA"]
-            else:
-                value = _round_half_up(100.0 * x1 / x0, 2)
-                retention_cols[target_ci] = [f"{value:.2f}%"]
-        else:
-            retention_cols[target_ci] = [""]
+    retention_row: list[str] = ["保持率"] + ["" for _ in metric_cols]
+    for metric_idx, col in enumerate(metric_cols, start=1):
+        if not col:
+            continue
+        x0 = col[0]
+        x1 = col[-1]
+        if math.isnan(x0) or x0 <= 0:
+            msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0")
+            logger.warning(msg, code="W1304")
+            warnings.append(msg)
+            retention_row[metric_idx] = "NA"
+            continue
+        value = _round_half_up(100.0 * x1 / x0, 2)
+        retention_row[metric_idx] = f"{value:.2f}%"
 
     for ci in range(len(out_cols)):
-        row_v = retention_cols[ci][0] if ci < len(retention_cols) and retention_cols[ci] else ""
-        out_cols[ci].append(row_v)
+        out_cols[ci].append("")
+    for ci in range(len(out_cols)):
+        out_cols[ci].append(retention_row[ci] if ci < len(retention_row) else "")
 
     rate_block = Block3Header(h1=h1, h2=h2, h3=h3, data=out_cols, warnings=warnings)
     retention_block = Block3Header(h1=[], h2=[], h3=[], data=[], warnings=warnings)
