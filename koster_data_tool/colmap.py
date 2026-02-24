@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fixed_tab_reader import read_fixed_tab_table, tokens_to_float_matrix
+from .fixed_tab_reader import CYCLE_TAIL_RE, read_fixed_tab_table, tokens_to_float_matrix
 from .run_report import report_error
 from .text_parse import extract_k_cycle_markers
 
@@ -52,6 +52,8 @@ def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], d
             mapped = "Zim"
         elif "z'" in token.lower() or "zre" in nn:
             mapped = "Zre"
+        elif nn in {"frequency", "freq", "频率"} or "frequency" in nn or "freq" in nn or "频率" in nn:
+            mapped = "Freq"
         elif nn in {"time", "时间", "t"} or "time" in nn or "时间" in nn:
             mapped = "t"
         elif nn in {"voltage", "电压", "e", "potential"} or "voltage" in nn or "potential" in nn or "电压" in nn:
@@ -116,6 +118,9 @@ def convert_units(col_index: dict[str, int], unit_raw: dict[str, str], data_cols
         elif key == "E":
             series[key] = vals
             unit_norm[key] = "V"
+        elif key == "Freq":
+            series[key] = vals
+            unit_norm[key] = "Hz"
         elif key in {"I", "j"}:
             is_density = (key == "j") or _is_density_unit(u)
             if "ma" in u:
@@ -206,8 +211,15 @@ def _enforce_required_columns(file_type: str, col_index: dict[str, int], file_pa
         if missing:
             _raise_with_report("E9007", f"E9007: missing required columns for GCD missing={','.join(missing)} file={file_path}", file_path, logger, run_report_path)
     elif ftype == "EIS":
-        if "Zre" not in col_index or "Zim" not in col_index:
-            _raise_with_report("E9008", f"E9008: missing required columns for EIS missing=Z'|Z'' file={file_path}", file_path, logger, run_report_path)
+        missing: list[str] = []
+        if "Freq" not in col_index:
+            missing.append("Freq")
+        if "Zre" not in col_index:
+            missing.append("Z'")
+        if "Zim" not in col_index:
+            missing.append("Z''")
+        if missing:
+            _raise_with_report("E9008", f"E9008: missing required columns for EIS missing={','.join(missing)} file={file_path}", file_path, logger, run_report_path)
 
 
 def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_start: float | None, v_end: float | None, logger, run_report_path: str) -> tuple[ColumnMapping, dict[str, list[float]], list[int], list[dict], bool, list[int] | None]:
@@ -226,13 +238,35 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
         code = msg.split(":", 1)[0] if msg.startswith("E") else "E9004"
         _raise_with_report(code, msg, file_path, logger, run_report_path)
 
-    try:
-        data_matrix = tokens_to_float_matrix(header, rows_tokens, file_path=file_path)
-    except ValueError as exc:
-        _raise_with_report("E9005", str(exc), file_path, logger, run_report_path)
-
     col_index, unit_raw = map_columns_from_header(header)
     _enforce_required_columns(file_type, col_index, file_path, logger, run_report_path)
+
+    try:
+        if file_type.upper() == "EIS":
+            required_cols = ["Freq", "Zre", "Zim"]
+            data_matrix = []
+            for row_idx, row_tokens in enumerate(rows_tokens, start=3):
+                row_vals: list[float] = [0.0 for _ in header]
+                for col_key in required_cols:
+                    col_idx = col_index[col_key]
+                    token = row_tokens[col_idx]
+                    token_clean = CYCLE_TAIL_RE.sub("", token).strip()
+                    col_name = header[col_idx] if col_idx < len(header) else f"col#{col_idx}"
+                    if token_clean == "":
+                        raise ValueError(
+                            f"E9005: non-numeric token file={file_path} row_index={row_idx} col_name={col_name} token={token}"
+                        )
+                    try:
+                        row_vals[col_idx] = float(token_clean)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"E9005: non-numeric token file={file_path} row_index={row_idx} col_name={col_name} token={token}"
+                        ) from exc
+                data_matrix.append(row_vals)
+        else:
+            data_matrix = tokens_to_float_matrix(header, rows_tokens, file_path=file_path)
+    except ValueError as exc:
+        _raise_with_report("E9005", str(exc), file_path, logger, run_report_path)
 
     data_cols = [] if not data_matrix else [[row[i] for row in data_matrix] for i in range(len(data_matrix[0]))]
     unit_norm, series, convert_warnings = convert_units(col_index, unit_raw, data_cols, a_geom_cm2)
