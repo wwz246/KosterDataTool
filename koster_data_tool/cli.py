@@ -234,6 +234,28 @@ def _write_sample_gcd_window_rep_fail(path: Path) -> None:
     )
 
 
+def _write_sample_gcd_window_boundary_bracket(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Time\tVoltage\tCurrent\tStep\tCycle\n"
+        "0\t3.0\t-1.0\t1\t1\n"
+        "1\t2.4\t-1.0\t1\t1\n"
+        "2\t2.6\t1.0\t2\t1\n"
+        "3\t3.3\t1.0\t2\t1\n"
+        "4\t4.3\t1.0\t2\t1\n"
+        "5\t4.2\t-1.0\t3\t1\n"
+        "6\t3.4\t-1.0\t3\t1\n"
+        "7\t2.4\t-1.0\t3\t1\n"
+        "8\t2.5\t1.0\t4\t2\n"
+        "9\t3.2\t1.0\t4\t2\n"
+        "10\t4.2\t1.0\t4\t2\n"
+        "11\t4.1\t-1.0\t5\t2\n"
+        "12\t3.3\t-1.0\t5\t2\n"
+        "13\t2.5\t-1.0\t5\t2\n",
+        encoding="utf-8",
+    )
+
+
 def _write_sample_eis_with_string_col(path: Path) -> None:
     path.write_text(
         "# comment\n"
@@ -340,6 +362,7 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_eis_with_string_col(struct_a / "EIS-11.txt")
     _write_sample_gcd_metrics(struct_a / "GCD-1.txt")
     _write_sample_gcd_window_nonrep_fail(struct_a / "GCD-11.txt")
+    _write_sample_gcd_window_boundary_bracket(struct_a / "GCD-12.txt")
     _write_sample_gcd_capacity_only(struct_a / "GCD-4.txt")
 
     step8_root = base_root / "step8"
@@ -698,6 +721,16 @@ def _selftest(ctx, logger) -> int:
     assert metrics_nonrep_fail.cycles[2].ok_window is False, "GCD-11 cycle2 应窗口失败"
     assert metrics_nonrep_fail.cycles[2].delta_q_chg is None and metrics_nonrep_fail.cycles[2].delta_q_dis is None, "窗口失败指标应为 NaN/None"
     assert any("W5204" in w and "cycle=2" in w for w in metrics_nonrep_fail.warnings), "非选定圈失败应记录 W5204"
+
+    metrics_boundary_bracket = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-12.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics_boundary_bracket.fatal_error is None, "段边界可插值样例不得触发 E5201"
+    assert metrics_boundary_bracket.cycles[1].ok_window is True, "段边界可插值样例应窗口成功"
 
     metrics_rep_fail = compute_gcd_file_metrics(
         file_path=str(struct_a / "GCD-11.txt"),

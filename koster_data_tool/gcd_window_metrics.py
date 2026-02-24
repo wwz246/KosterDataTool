@@ -83,6 +83,17 @@ def _interp_pair(i: int, target_v: float, t: list[float], E: list[float], I: lis
     return t0, target_v, ii, qq
 
 
+def _interp_pair_global(g_i: int, target_v: float, global_t: list[float], global_E: list[float], global_I: list[float] | None) -> tuple[float, float, float | None]:
+    e0, e1 = global_E[g_i], global_E[g_i + 1]
+    de = e1 - e0
+    if abs(de) < 1e-15:
+        raise ValueError("电压窗截取失败: 插值分母为0")
+    alpha = (target_v - e0) / de
+    t0 = global_t[g_i] + alpha * (global_t[g_i + 1] - global_t[g_i])
+    ii = None if global_I is None else global_I[g_i] + alpha * (global_I[g_i + 1] - global_I[g_i])
+    return t0, target_v, ii
+
+
 def _crosses(a: float, b: float, target: float, upward: bool) -> bool:
     eps = 1e-12
     if upward:
@@ -124,7 +135,6 @@ def clip_segment_by_voltage_window(
     global_t: list[float], global_E: list[float], global_I: list[float] | None,
     seg_global_indices: list[int]
 ) -> WindowTrace:
-    del global_t, global_I
     warnings: list[str] = []
     if len(t) < 2 or len(E) < 2 or v_start >= v_end:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
@@ -139,28 +149,37 @@ def clip_segment_by_voltage_window(
         start_pick, end_pick = "last", "first"
 
     start_events = _find_event_indices(E, start_target, upward=upward_start)
-    if not start_events:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-    start_i_hint = start_events[-1] if start_pick == "last" else start_events[0]
-    g_center_start = seg_global_indices[min(start_i_hint, len(seg_global_indices) - 2)]
-    start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
-    if start_global_pair is None:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-    start_i = _local_index_by_global_pair(seg_global_indices, start_global_pair)
-    if start_i is None:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+    start_i_local: int | None = None
+    start_global_pair: int | None = None
+    start_uses_global = False
+    if start_events:
+        start_i_local = start_events[-1] if start_pick == "last" else start_events[0]
+    else:
+        g_center_start = seg_global_indices[0]
+        start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
+        if start_global_pair is None:
+            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+        start_i_local = _local_index_by_global_pair(seg_global_indices, start_global_pair)
+        start_uses_global = True
 
-    end_events = [i for i in _find_event_indices(E, end_target, upward=upward_end) if i >= start_i]
-    if not end_events:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-    end_i_hint = end_events[0] if end_pick == "first" else end_events[-1]
-    g_center_end = seg_global_indices[min(end_i_hint, len(seg_global_indices) - 2)]
-    end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
-    if end_global_pair is None:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
-    end_i = _local_index_by_global_pair(seg_global_indices, end_global_pair)
-    if end_i is None or end_i < start_i:
-        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+    all_end_events = _find_event_indices(E, end_target, upward=upward_end)
+    if start_i_local is not None:
+        end_events = [i for i in all_end_events if i >= start_i_local]
+    else:
+        end_events = all_end_events
+
+    end_i_local: int | None = None
+    end_global_pair: int | None = None
+    end_uses_global = False
+    if end_events:
+        end_i_local = end_events[0] if end_pick == "first" else end_events[-1]
+    else:
+        g_center_end = seg_global_indices[-1]
+        end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
+        if end_global_pair is None:
+            return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+        end_i_local = _local_index_by_global_pair(seg_global_indices, end_global_pair)
+        end_uses_global = True
 
     w_t: list[float] = []
     w_E: list[float] = []
@@ -178,13 +197,35 @@ def clip_segment_by_voltage_window(
             w_Q.append(0.0 if pt_q is None else pt_q)
 
     try:
-        st, se, si, sq = _interp_pair(start_i, start_target, t, E, I, Q)
-        et, ee, ei, eq = _interp_pair(end_i, end_target, t, E, I, Q)
+        if start_uses_global:
+            assert start_global_pair is not None
+            st, se, si = _interp_pair_global(start_global_pair, start_target, global_t, global_E, global_I)
+            sq = None
+            if start_i_local is not None:
+                _, _, _, sq = _interp_pair(start_i_local, start_target, t, E, I, Q)
+        else:
+            assert start_i_local is not None
+            st, se, si, sq = _interp_pair(start_i_local, start_target, t, E, I, Q)
+
+        if end_uses_global:
+            assert end_global_pair is not None
+            et, ee, ei = _interp_pair_global(end_global_pair, end_target, global_t, global_E, global_I)
+            eq = None
+            if end_i_local is not None:
+                _, _, _, eq = _interp_pair(end_i_local, end_target, t, E, I, Q)
+        else:
+            assert end_i_local is not None
+            et, ee, ei, eq = _interp_pair(end_i_local, end_target, t, E, I, Q)
     except ValueError:
         return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
 
+    start_loop_idx = 0 if start_i_local is None else (start_i_local + 1)
+    end_loop_idx = (len(t) - 1) if end_i_local is None else end_i_local
+    if et <= st + 1e-15 or end_loop_idx < start_loop_idx - 1:
+        return WindowTrace([], [], None if I is None else [], None if Q is None else [], False, False, ["电压窗截取失败"])
+
     _push(st, se, si, sq)
-    for i in range(start_i + 1, end_i + 1):
+    for i in range(start_loop_idx, end_loop_idx + 1):
         _push(t[i], E[i], None if I is None else I[i], None if Q is None else Q[i])
     _push(et, ee, ei, eq)
 
