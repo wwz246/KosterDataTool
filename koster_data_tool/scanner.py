@@ -44,6 +44,7 @@ class ScanResult:
     skipped_dir_count: int
     skipped_file_count: int
     skipped_report_path: str
+    ignored_invalid_dirs: list[str]
 
 
 def _max_cycle_from_parse_core(file_type: str, content: str, file_path: Path) -> Optional[int]:
@@ -146,6 +147,17 @@ def _collect_skipped_deep_paths(root_path: Path) -> tuple[int, int, list[str]]:
     return skipped_dirs, skipped_files, skipped_paths
 
 
+
+
+def _is_non_empty_parse(path: Path) -> bool:
+    try:
+        header, rows_tokens = read_fixed_tab_table(str(path))
+        matrix = tokens_to_float_matrix(header, rows_tokens, file_path=str(path))
+    except Exception:
+        return False
+    return bool(matrix)
+
+
 def scan_root(
     root_path: str,
     program_dir: str,
@@ -163,31 +175,35 @@ def scan_root(
             progress_cb(stage, current, max(0.0, min(100.0, percent)), bcnt, rcnt, sdcnt, sfcnt)
 
     skipped_dir_count, skipped_file_count, skipped_paths = _collect_skipped_deep_paths(root)
-    skipped_report_path.write_text("\n".join(skipped_paths), encoding="utf-8")
 
     recognized_count = 0
     batteries: list[BatteryScan] = []
+    ignored_invalid_dirs: list[str] = []
 
     root_files = [p for p in root.iterdir() if p.is_file()]
     root_recognized = [rf for p in root_files if (rf := _detect_file(p.name, p))]
     structure = "A" if root_recognized else "B"
 
     if structure == "A":
-        cv_files = _sort_recognized([f for f in root_recognized if f.file_type == "CV"])
-        gcd_files = _sort_recognized([f for f in root_recognized if f.file_type == "GCD"])
-        eis_files = _sort_recognized([f for f in root_recognized if f.file_type == "EIS"])
+        cv_recognized = _sort_recognized([f for f in root_recognized if f.file_type == "CV"])
+        gcd_recognized = _sort_recognized([f for f in root_recognized if f.file_type == "GCD"])
+        eis_recognized = _sort_recognized([f for f in root_recognized if f.file_type == "EIS"])
         recognized_count += len(root_recognized)
 
+        cv_files: list[RecognizedFile] = []
+        gcd_files: list[RecognizedFile] = []
+        eis_files: list[RecognizedFile] = []
         cv_cycles: list[int] = []
         gcd_cycles: list[int] = []
-        for file_obj in cv_files:
+        for file_obj in cv_recognized:
             if cancel_flag and cancel_flag.is_set():
                 break
             txt = _safe_read_text(Path(file_obj.path))
             mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
             if mc is not None:
+                cv_files.append(file_obj)
                 cv_cycles.append(mc)
-        for file_obj in gcd_files:
+        for file_obj in gcd_recognized:
             if cancel_flag and cancel_flag.is_set():
                 break
             txt = _safe_read_text(Path(file_obj.path))
@@ -195,19 +211,28 @@ def scan_root(
                 continue
             mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
             if mc is not None:
+                gcd_files.append(file_obj)
                 gcd_cycles.append(mc)
+        for file_obj in eis_recognized:
+            if cancel_flag and cancel_flag.is_set():
+                break
+            if _is_non_empty_parse(Path(file_obj.path)):
+                eis_files.append(file_obj)
 
-        batteries.append(
-            BatteryScan(
-                name=root.name,
-                base_dir=str(root),
-                cv_files=cv_files,
-                gcd_files=gcd_files,
-                eis_files=eis_files,
-                cv_max_cycle=max(cv_cycles) if cv_cycles else None,
-                gcd_max_cycle=max(gcd_cycles) if gcd_cycles else None,
+        if not (cv_files or gcd_files or eis_files):
+            ignored_invalid_dirs.append(str(root))
+        else:
+            batteries.append(
+                BatteryScan(
+                    name=root.name,
+                    base_dir=str(root),
+                    cv_files=cv_files,
+                    gcd_files=gcd_files,
+                    eis_files=eis_files,
+                    cv_max_cycle=max(cv_cycles) if cv_cycles else None,
+                    gcd_max_cycle=max(gcd_cycles) if gcd_cycles else None,
+                )
             )
-        )
         emit("扫描中", root.name, 100.0, len(batteries), recognized_count, skipped_dir_count, skipped_file_count)
     else:
         bat_dirs = [p for p in root.iterdir() if p.is_dir()]
@@ -223,21 +248,25 @@ def scan_root(
                 if r:
                     recognized.append(r)
 
-            cv_files = _sort_recognized([f for f in recognized if f.file_type == "CV"])
-            gcd_files = _sort_recognized([f for f in recognized if f.file_type == "GCD"])
-            eis_files = _sort_recognized([f for f in recognized if f.file_type == "EIS"])
+            cv_recognized = _sort_recognized([f for f in recognized if f.file_type == "CV"])
+            gcd_recognized = _sort_recognized([f for f in recognized if f.file_type == "GCD"])
+            eis_recognized = _sort_recognized([f for f in recognized if f.file_type == "EIS"])
             recognized_count += len(recognized)
 
+            cv_files: list[RecognizedFile] = []
+            gcd_files: list[RecognizedFile] = []
+            eis_files: list[RecognizedFile] = []
             cv_cycles: list[int] = []
             gcd_cycles: list[int] = []
-            for file_obj in cv_files:
+            for file_obj in cv_recognized:
                 if cancel_flag and cancel_flag.is_set():
                     break
                 txt = _safe_read_text(Path(file_obj.path))
                 mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
                 if mc is not None:
+                    cv_files.append(file_obj)
                     cv_cycles.append(mc)
-            for file_obj in gcd_files:
+            for file_obj in gcd_recognized:
                 if cancel_flag and cancel_flag.is_set():
                     break
                 txt = _safe_read_text(Path(file_obj.path))
@@ -245,19 +274,28 @@ def scan_root(
                     continue
                 mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
                 if mc is not None:
+                    gcd_files.append(file_obj)
                     gcd_cycles.append(mc)
+            for file_obj in eis_recognized:
+                if cancel_flag and cancel_flag.is_set():
+                    break
+                if _is_non_empty_parse(Path(file_obj.path)):
+                    eis_files.append(file_obj)
 
-            batteries.append(
-                BatteryScan(
-                    name=bat_dir.name,
-                    base_dir=str(bat_dir.resolve()),
-                    cv_files=cv_files,
-                    gcd_files=gcd_files,
-                    eis_files=eis_files,
-                    cv_max_cycle=max(cv_cycles) if cv_cycles else None,
-                    gcd_max_cycle=max(gcd_cycles) if gcd_cycles else None,
+            if not (cv_files or gcd_files or eis_files):
+                ignored_invalid_dirs.append(str(bat_dir.resolve()))
+            else:
+                batteries.append(
+                    BatteryScan(
+                        name=bat_dir.name,
+                        base_dir=str(bat_dir.resolve()),
+                        cv_files=cv_files,
+                        gcd_files=gcd_files,
+                        eis_files=eis_files,
+                        cv_max_cycle=max(cv_cycles) if cv_cycles else None,
+                        gcd_max_cycle=max(gcd_cycles) if gcd_cycles else None,
+                    )
                 )
-            )
             emit(
                 "扫描中",
                 bat_dir.name,
@@ -273,6 +311,11 @@ def scan_root(
     available_eis = sorted({f.num for b in batteries for f in b.eis_files})
 
     emit("完成", root.name, 100.0, len(batteries), recognized_count, skipped_dir_count, skipped_file_count)
+    report_lines = list(skipped_paths)
+    for invalid_dir in ignored_invalid_dirs:
+        report_lines.append(f"IGNORED_INVALID_DIR	{invalid_dir}	无有效电化学数据")
+    skipped_report_path.write_text("\n".join(report_lines), encoding="utf-8")
+
     return ScanResult(
         root_path=str(root),
         structure=structure,
@@ -284,4 +327,5 @@ def scan_root(
         skipped_dir_count=skipped_dir_count,
         skipped_file_count=skipped_file_count,
         skipped_report_path=str(skipped_report_path.resolve()),
+        ignored_invalid_dirs=ignored_invalid_dirs,
     )

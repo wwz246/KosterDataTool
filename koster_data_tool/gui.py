@@ -328,6 +328,8 @@ class App:
         self.root.after(120, self._poll_queue)
 
     def _log_recognized_files(self, result: ScanResult) -> None:
+        for ignored_dir in result.ignored_invalid_dirs:
+            self.logger.info("目录已忽略：无有效电化学数据", dir_path=ignored_dir)
         for battery in result.batteries:
             for file_type, files in (("CV", battery.cv_files), ("GCD", battery.gcd_files), ("EIS", battery.eis_files)):
                 for rf in files:
