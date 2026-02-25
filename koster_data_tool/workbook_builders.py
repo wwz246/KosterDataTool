@@ -88,6 +88,8 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
     col = 1
     end_row = 1
     for b in selected_bats:
+        if not b.gcd_files:
+            continue
         try:
             rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=True)
             if len(rr.rate.h3) >= 2:
@@ -102,7 +104,7 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
         end_row = max(end_row, er)
 
     for n in selections.get("cv_nums", []):
-        ws_cv = wb.create_sheet(f"CV-{n}")
+        ws_cv = None
         col = 1
         for b in selected_bats:
             fp = _find_file(b.cv_files, float(n))
@@ -115,11 +117,13 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
                 _record_failure(run_report_path, logger, fp, exc)
                 continue
             blk = _electrode_curve_block(blk, b.name)
+            if ws_cv is None:
+                ws_cv = wb.create_sheet(f"CV-{n}")
             write_block(ws_cv, col, 1, blk)
             col += len(blk.h1)
 
     for n in selections.get("gcd_nums", []):
-        ws_g = wb.create_sheet(f"GCD-{n}")
+        ws_g = None
         col = 1
         for b in selected_bats:
             fp = _find_file(b.gcd_files, float(n))
@@ -132,11 +136,13 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
                 _record_failure(run_report_path, logger, fp, exc)
                 continue
             blk = _electrode_curve_block(blk, b.name)
+            if ws_g is None:
+                ws_g = wb.create_sheet(f"GCD-{n}")
             write_block(ws_g, col, 1, blk)
             col += len(blk.h1)
 
     for n in selections.get("eis_nums", []):
-        ws_e = wb.create_sheet(f"EIS-{n}")
+        ws_e = None
         col = 1
         for b in selected_bats:
             fp = _find_file(b.eis_files, float(n))
@@ -148,6 +154,8 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
                 _record_failure(run_report_path, logger, fp, exc)
                 continue
             blk = _electrode_curve_block(blk, b.name)
+            if ws_e is None:
+                ws_e = wb.create_sheet(f"EIS-{n}")
             write_block(ws_e, col, 1, blk)
             col += len(blk.h1)
 
@@ -233,7 +241,7 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
     _build_param_summary_sheet(wb, scan_result, params, logger, run_report_path)
 
     for b in sorted(scan_result.batteries, key=lambda x: x.name):
-        ws = wb.create_sheet(b.name)
+        ws = None
         bp = params["battery_params"][b.name]
         col = 1
 
@@ -243,9 +251,12 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
             except Exception as exc:
                 _record_failure(run_report_path, logger, f.path, exc)
                 continue
+            if ws is None:
+                ws = wb.create_sheet(b.name)
             write_block(ws, col, 1, blk)
             col += len(blk.h1)
-        col = blank_col_after(ws, col)
+        if ws is not None:
+            col = blank_col_after(ws, col)
 
         for f in sorted(b.gcd_files, key=lambda x: x.num):
             try:
@@ -253,9 +264,12 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
             except Exception as exc:
                 _record_failure(run_report_path, logger, f.path, exc)
                 continue
+            if ws is None:
+                ws = wb.create_sheet(b.name)
             write_block(ws, col, 1, blk)
             col += len(blk.h1)
-        col = blank_col_after(ws, col)
+        if ws is not None:
+            col = blank_col_after(ws, col)
 
         for f in sorted(b.eis_files, key=lambda x: x.num):
             try:
@@ -263,22 +277,27 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
             except Exception as exc:
                 _record_failure(run_report_path, logger, f.path, exc)
                 continue
+            if ws is None:
+                ws = wb.create_sheet(b.name)
             write_block(ws, col, 1, blk)
             col += len(blk.h1)
-        col = blank_col_after(ws, col)
+        if ws is not None:
+            col = blank_col_after(ws, col)
 
-        try:
-            rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=False)
-        except Exception as exc:
-            _record_failure(run_report_path, logger, b.name, exc)
-            rr = type("Tmp", (), {"rate": _empty_curve_block(), "retention": _empty_curve_block()})()
-        rate = copy.deepcopy(rr.rate)
-        retention = copy.deepcopy(rr.retention)
-        if len(rate.h3) >= 2:
-            rate.h3 = [""] + ["Rate"] + ["" for _ in rate.h3[2:]]
-        if len(retention.h3) >= 2:
-            retention.h3 = [""] + ["Retention"] + ["" for _ in retention.h3[2:]]
-        _, er = write_block(ws, col, 1, rate)
-        write_block(ws, col, er + 2, retention)
-
+        if b.gcd_files:
+            try:
+                rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=False)
+            except Exception as exc:
+                _record_failure(run_report_path, logger, b.name, exc)
+                rr = type("Tmp", (), {"rate": _empty_curve_block(), "retention": _empty_curve_block()})()
+            rate = copy.deepcopy(rr.rate)
+            retention = copy.deepcopy(rr.retention)
+            if len(rate.h3) >= 2:
+                rate.h3 = [""] + ["Rate"] + ["" for _ in rate.h3[2:]]
+            if len(retention.h3) >= 2:
+                retention.h3 = [""] + ["Retention"] + ["" for _ in retention.h3[2:]]
+            if ws is None:
+                ws = wb.create_sheet(b.name)
+            _, er = write_block(ws, col, 1, rate)
+            write_block(ws, col, er + 2, retention)
     return wb
