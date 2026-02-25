@@ -9,7 +9,7 @@ from statistics import median
 from .colmap import _append_run_report, parse_file_for_cycles
 from .run_report import report_error, report_warning
 from .cycle_split import split_cycles
-from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_reverse_segment, segment_one_cycle
+from .gcd_segment import calc_m_active_g, decide_main_order, segment_one_cycle
 
 
 @dataclass
@@ -141,12 +141,25 @@ def _local_index_by_global_pair(seg_global_indices: list[int], g_pair: int) -> i
     return None
 
 
+
+def _find_assist_pair_from_indices(global_E: list[float], target: float, upward: bool, assist_indices: list[int]) -> int | None:
+    if len(global_E) < 2 or not assist_indices:
+        return None
+    for g in assist_indices:
+        if g < 0 or g >= len(global_E) - 1:
+            continue
+        if _crosses(global_E[g], global_E[g + 1], target, upward):
+            return g
+    return None
+
+
 def clip_segment_by_voltage_window(
     t: list[float], E: list[float], I: list[float] | None, Q: list[float] | None,
     v_start: float, v_end: float,
     direction: str,
     global_t: list[float], global_E: list[float], global_I: list[float] | None,
-    seg_global_indices: list[int]
+    seg_global_indices: list[int],
+    assist_global_indices: list[int] | None = None,
 ) -> WindowTrace:
     warnings: list[str] = []
     if len(t) < 2 or len(E) < 2 or v_start >= v_end:
@@ -169,7 +182,10 @@ def clip_segment_by_voltage_window(
         start_i_local = start_events[-1] if start_pick == "last" else start_events[0]
     else:
         g_center_start = seg_global_indices[0]
-        start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
+        if assist_global_indices:
+            start_global_pair = _find_assist_pair_from_indices(global_E, start_target, upward_start, assist_global_indices)
+        if start_global_pair is None:
+            start_global_pair = _find_bracket_in_global(global_E, g_center_start, start_target, upward_start)
         if start_global_pair is None:
             start_global_pair = _pick_edge_pair_for_extrapolation(global_t, global_E, g_center_start, "head")
             if start_global_pair is None:
@@ -191,7 +207,10 @@ def clip_segment_by_voltage_window(
         end_i_local = end_events[0] if end_pick == "first" else end_events[-1]
     else:
         g_center_end = seg_global_indices[-1]
-        end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
+        if assist_global_indices:
+            end_global_pair = _find_assist_pair_from_indices(global_E, end_target, upward_end, list(reversed(assist_global_indices)))
+        if end_global_pair is None:
+            end_global_pair = _find_bracket_in_global(global_E, g_center_end, end_target, upward_end)
         if end_global_pair is None:
             end_global_pair = _pick_edge_pair_for_extrapolation(global_t, global_E, g_center_end, "tail")
             if end_global_pair is None:
@@ -298,6 +317,8 @@ def compute_one_cycle_metrics(
     prefer_current_source: dict,
     logger, run_report_path: str,
     file_path: str,
+    suppress_report: bool = False,
+    assist_global_indices: list[int] | None = None,
 ) -> GcdCycleMetrics:
     warnings: list[str] = []
     delta_v_noir = v_end - v_start
@@ -306,8 +327,8 @@ def compute_one_cycle_metrics(
     if output_type == "Qsp" and k_factor is not None:
         raise ValueError("Qsp 模式下不得传 k_factor")
 
-    wt1 = clip_segment_by_voltage_window(**seg1_raw)
-    wt2 = clip_segment_by_voltage_window(**seg2_raw)
+    wt1 = clip_segment_by_voltage_window(**seg1_raw, assist_global_indices=assist_global_indices)
+    wt2 = clip_segment_by_voltage_window(**seg2_raw, assist_global_indices=assist_global_indices)
     warnings.extend(wt1.warnings)
     warnings.extend(wt2.warnings)
 
@@ -340,11 +361,11 @@ def compute_one_cycle_metrics(
         dq2 = abs(Q2[-1] - Q2[0])
         dq1_eff = math.nan if len(Q1) < 3 else abs(Q1[-1] - Q1[1])
         dq2_eff = math.nan if len(Q2) < 3 else abs(Q2[-1] - Q2[1])
-        line = report_warning(run_report_path, "W5101", "容量差分算ΔQ", file_path=file_path, cycle=cycle_k)
+        line = f"W5101 容量差分算ΔQ file_path={file_path} cycle={cycle_k}" if suppress_report else report_warning(run_report_path, "W5101", "容量差分算ΔQ", file_path=file_path, cycle=cycle_k)
         warnings.append(line)
         logger.warning(line, code="W5101", cycle_k=cycle_k, file_path=file_path, delta_q_source="capacity")
     else:
-        line = report_error(run_report_path, "E5102", "缺电流且缺容量", file_path=file_path, cycle=cycle_k)
+        line = f"E5102 缺电流且缺容量 file_path={file_path} cycle={cycle_k}" if suppress_report else report_error(run_report_path, "E5102", "缺电流且缺容量", file_path=file_path, cycle=cycle_k)
         warnings.append(line)
         logger.error(line, code="E5102", cycle_k=cycle_k, file_path=file_path)
         return GcdCycleMetrics(cycle_k, True, delta_t, delta_t_samp, None, None, None, None, None, delta_v_noir, None, None, None, None, warnings)
@@ -353,7 +374,8 @@ def compute_one_cycle_metrics(
         w = f"W5201 窗口点数不足，ΔQ_eff/ΔV_eff 为 NaN file_path={file_path} cycle={cycle_k}"
         warnings.append(w)
         logger.warning(w, code="W5201", file_path=file_path, cycle=cycle_k)
-        _append_run_report(run_report_path, w)
+        if not suppress_report:
+            _append_run_report(run_report_path, w)
     dv1_eff = math.nan if len(E1) < 3 else abs(E1[-1] - E1[1])
     dv2_eff = math.nan if len(E2) < 3 else abs(E2[-1] - E2[1])
 
@@ -379,7 +401,7 @@ def compute_one_cycle_metrics(
         i2 = median(seg2_raw["I"])
     if i1 is None or i2 is None:
         r_turn = math.nan
-        line = report_warning(run_report_path, "W1103", "缺电流无法算R_turn", file_path=file_path, cycle=cycle_k)
+        line = f"W1103 缺电流无法算R_turn file_path={file_path} cycle={cycle_k}" if suppress_report else report_warning(run_report_path, "W1103", "缺电流无法算R_turn", file_path=file_path, cycle=cycle_k)
         warnings.append(line)
         logger.warning(line, code="W1103", file_path=file_path, cycle=cycle_k)
     else:
@@ -442,6 +464,8 @@ def compute_gcd_file_metrics(
     )
     split_result = split_cycles("GCD", has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
     max_cycle = split_result.max_cycle or 0
+    if n_gcd <= 1 and max_cycle >= 2:
+        n_gcd = 2
 
     def _build_seg_current(idxs: list[int]) -> list[float]:
         if "I" in series:
@@ -463,7 +487,8 @@ def compute_gcd_file_metrics(
 
     all_cycle_segments = []
     per_cycle_indices: dict[int, list[int]] = {}
-    for k in range(1, max_cycle + 1):
+    first_cycle_assist_indices = split_result.cycles.get(1, []) if 1 in split_result.cycles else []
+    for k in range(2, max_cycle + 1):
         idxs = split_result.cycles.get(k, [])
         per_cycle_indices[k] = idxs
         if not idxs:
@@ -496,8 +521,6 @@ def compute_gcd_file_metrics(
     for cyc in all_cycle_segments:
         k = cyc.cycle_k
         segs = cyc
-        if k == 1 and max_cycle >= 2:
-            segs = drop_first_cycle_reverse_segment(cyc, type("obj", (), {"order": main_order})())
 
         desired = ["charge", "discharge"] if main_order == "Charge→Discharge" else ["discharge", "charge"]
         chosen = []
@@ -536,11 +559,16 @@ def compute_gcd_file_metrics(
 
         seg1_raw = _mk_seg_raw(chosen[0], desired[0])
         seg2_raw = _mk_seg_raw(chosen[1], desired[1])
-        cm = compute_one_cycle_metrics(k, seg1_raw, seg2_raw, main_order, v_start, v_end, a_geom, m_active_g, k_factor, output_type, prefer_source, logger, run_report_path, file_path)
+        assist_for_k = first_cycle_assist_indices if (k == 2 and first_cycle_assist_indices) else None
+        cm = compute_one_cycle_metrics(
+            k, seg1_raw, seg2_raw, main_order, v_start, v_end, a_geom, m_active_g, k_factor,
+            output_type, prefer_source, logger, run_report_path, file_path,
+            assist_global_indices=assist_for_k,
+        )
         cycles[k] = cm
         if any("E5102" in w for w in cm.warnings):
             fatal_error = f"E5102 缺电流且缺容量列，ΔQ 无法计算 file_path={file_path} n_gcd={n_gcd}"
-        if not cm.ok_window and k != n_gcd:
+        if not cm.ok_window and k != n_gcd and k != 1:
             line = report_warning(
                 run_report_path,
                 "W5204",
@@ -553,8 +581,11 @@ def compute_gcd_file_metrics(
             file_warnings.append(line)
             logger.warning(line, code="W5204", file_path=file_path, cycle=k, V_start=v_start, V_end=v_end)
 
-    rep_ok = bool(cycles.get(n_gcd) and cycles[n_gcd].ok_window)
-    if not rep_ok:
+    if n_gcd <= 1:
+        rep_ok = True
+    else:
+        rep_ok = bool(cycles.get(n_gcd) and cycles[n_gcd].ok_window)
+    if not rep_ok and n_gcd > 1:
         fatal_error = report_error(
             run_report_path,
             "E5201",

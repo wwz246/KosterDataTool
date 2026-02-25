@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .fixed_tab_reader import CYCLE_TAIL_RE, read_fixed_tab_table, tokens_to_float_matrix
@@ -20,6 +20,7 @@ class ColumnMapping:
     col_index: dict[str, int]
     unit: dict[str, str]
     warnings: list[str]
+    source_header: dict[str, str] = field(default_factory=dict)
 
 
 def normalize_header_token(s: str) -> tuple[str, str]:
@@ -37,9 +38,16 @@ def _is_density_unit(unit: str) -> bool:
     return "/cm2" in u or "/cm^2" in u or "/mm2" in u or "/m2" in u
 
 
-def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], dict[str, str]]:
+def _norm_z_token(s: str) -> str:
+    t = unicodedata.normalize("NFKC", s or "").lower()
+    t = t.replace("′", "'").replace("＇", "'")
+    return re.sub(r"\s+", "", t)
+
+
+def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
     col_index: dict[str, int] = {}
     unit: dict[str, str] = {}
+    source_header: dict[str, str] = {}
 
     for i, token in enumerate(header_tokens):
         name_norm, unit_raw = normalize_header_token(token)
@@ -48,9 +56,17 @@ def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], d
             continue
 
         mapped = None
-        if "z''" in token.lower() or "zim" in nn:
+        ztok = _norm_z_token(token)
+        if (
+            "z''" in ztok
+            or 'z""' in ztok
+            or "-z''" in ztok
+            or "imag" in nn
+            or "虚部" in token
+            or "zim" in nn
+        ):
             mapped = "Zim"
-        elif "z'" in token.lower() or "zre" in nn:
+        elif "z'" in ztok or "real" in nn or "实部" in token or "zre" in nn:
             mapped = "Zre"
         elif nn in {"frequency", "freq", "频率"} or "frequency" in nn or "freq" in nn or "频率" in nn:
             mapped = "Freq"
@@ -73,10 +89,11 @@ def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], d
 
         if mapped and mapped not in col_index:
             col_index[mapped] = i
+            source_header[mapped] = token
             if unit_raw:
                 unit[mapped] = unit_raw
 
-    return col_index, unit
+    return col_index, unit, source_header
 
 
 def _norm_unit(u: str) -> str:
@@ -238,7 +255,7 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
         code = msg.split(":", 1)[0] if msg.startswith("E") else "E9004"
         _raise_with_report(code, msg, file_path, logger, run_report_path)
 
-    col_index, unit_raw = map_columns_from_header(header)
+    col_index, unit_raw, source_header = map_columns_from_header(header)
     _enforce_required_columns(file_type, col_index, file_path, logger, run_report_path)
 
     try:
@@ -281,6 +298,7 @@ def parse_file_for_cycles(file_path: str, file_type: str, a_geom_cm2: float, v_s
         col_index=col_index,
         unit=unit_norm,
         warnings=list(convert_warnings),
+        source_header=source_header,
     )
     has_cycle_col, cycle_values = _extract_cycle_values(series)
     return mapping, series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values

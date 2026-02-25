@@ -86,8 +86,8 @@ def build_rate_and_retention_for_battery(
         h2 = ["A/g", "mAh/g"]
         h3 = ["", ""]
 
-    metric_cols: list[list[float]] = [[] for _ in range(len(out_cols) - 1)]
     metric_keys = ["csp_noir", "csp_eff", "r_drop", "r_turn"] if output_type == "Csp" else ["qsp"]
+    metric_cols: list[list[float]] = [[] for _ in range(len(metric_keys))]
 
     for fp in rows:
         result = compute_gcd_file_metrics(
@@ -97,7 +97,7 @@ def build_rate_and_retention_for_battery(
             logger=logger,
             run_report_path=run_report_path,
         )
-        rep = result.cycles.get(n_gcd)
+        rep = result.cycles.get(result.n_gcd)
         j = _gcd_label(fp)
         out_cols[0].append(j)
 
@@ -114,8 +114,8 @@ def build_rate_and_retention_for_battery(
                 dv_eff_rep = rep.delta_v_eff_chg
             csp_eff = _calc_csp(dq_eff_rep, dv_eff_rep, m_active_g, float(k_factor))
             if math.isnan(csp_eff):
-                msg = f"W5202 Csp(eff) 无法计算 file={fp} cycle={n_gcd}"
-                logger.warning(msg, code="W5202", file_path=fp, cycle=n_gcd)
+                msg = f"W5202 Csp(eff) 无法计算 file={fp} cycle={result.n_gcd}"
+                logger.warning(msg, code="W5202", file_path=fp, cycle=result.n_gcd)
                 _append_run_report(run_report_path, msg)
                 warnings.append(msg)
             vals = [
@@ -137,6 +137,7 @@ def build_rate_and_retention_for_battery(
         chosen_idx = 1 if chosen == "csp_noir" else 2
         out_cols = [out_cols[0], out_cols[chosen_idx]]
         metric_cols = [metric_cols[chosen_idx - 1]]
+        metric_keys = [chosen]
         if chosen == "csp_noir":
             h1 = ["Current density", "Specific capacitance (noIR)"]
             h2 = ["A/g", "F/g"]
@@ -146,8 +147,13 @@ def build_rate_and_retention_for_battery(
             h2 = ["A/g", "F/g"]
             h3 = ["", "有效值"]
 
-    retention_row: list[str] = ["保持率"] + ["" for _ in metric_cols]
-    for metric_idx, col in enumerate(metric_cols, start=1):
+    retention_row: list[str] = ["保持率"] + ["" for _ in range(len(out_cols) - 1)]
+    retention_metric_keys = {"qsp", "csp_noir", "csp_eff"}
+    for out_idx in range(1, len(out_cols)):
+        metric_key = metric_keys[out_idx - 1] if out_idx - 1 < len(metric_keys) else ""
+        if metric_key not in retention_metric_keys:
+            continue
+        col = metric_cols[out_idx - 1] if out_idx - 1 < len(metric_cols) else []
         if not col:
             continue
         x0 = col[0]
@@ -156,10 +162,10 @@ def build_rate_and_retention_for_battery(
             msg = report_warning(run_report_path, "W1304", "Retention 基准X0缺失或<=0")
             logger.warning(msg, code="W1304")
             warnings.append(msg)
-            retention_row[metric_idx] = "NA"
+            retention_row[out_idx] = "NA"
             continue
         value = _round_half_up(100.0 * x1 / x0, 2)
-        retention_row[metric_idx] = f"{value:.2f}%"
+        retention_row[out_idx] = f"{value:.2f}%"
 
     for ci in range(len(out_cols)):
         out_cols[ci].append("")
