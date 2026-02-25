@@ -154,6 +154,11 @@ class App:
             self.param_page,
             text="质量口径提示：半电池其中一侧质量请填 0；质量均为不含集流体的活性层质量。",
             foreground="#444444",
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            self.param_page,
+            text="K 为换算系数：K=1 按整体器件直接计算；K=2 按两电极/单侧口径进行一次换算；K=4（推荐默认）按对称器件换算到单电极材料口径。不确定时先填 4。",
+            foreground="#1f4e79",
         ).pack(anchor="w", pady=(0, 6))
 
         table_wrap = ttk.Frame(self.param_page)

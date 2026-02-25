@@ -166,8 +166,10 @@ def export_eis_block(
             raise ValueError("EIS 缺少 Zre/Zim 列")
         zre = list(series["Zre"])
         nzim = [-x for x in series["Zim"]]
-        if any(x > 0 for x in series["Zim"]):
-            msg = "EIS 导出按口径输出 -Z''"
+        src_zim = (mapping.source_header.get("Zim", "") if getattr(mapping, "source_header", None) else "").replace(" ", "")
+        src_norm = src_zim.lower().replace("′", "'")
+        if "z''" in src_norm or 'z""' in src_norm:
+            msg = "检测到原始虚部列为 Z''，导出时已按约定取负号写为 -Z''"
             logger.info(msg, file=file_path)
             _append_run_report(run_report_path, msg)
         return Block3Header(

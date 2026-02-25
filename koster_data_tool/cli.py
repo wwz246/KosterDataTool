@@ -705,9 +705,9 @@ def _selftest(ctx, logger) -> int:
         logger=logger,
         run_report_path=str(ctx.report_path),
     )
-    assert metrics_capacity.cycles[1].delta_q_source == "capacity", "W5101 样例应为 capacity 源"
-    ce_raw = 100 * (metrics.cycles[1].delta_q_dis / metrics.cycles[1].delta_q_chg)
-    ce_rounded_proxy = 100 * (round(metrics.cycles[1].delta_q_dis, 2) / round(metrics.cycles[1].delta_q_chg, 2))
+    assert metrics_capacity.cycles[metrics_capacity.n_gcd].delta_q_source == "capacity", "W5101 样例应为 capacity 源"
+    ce_raw = 100 * (metrics.cycles[metrics.n_gcd].delta_q_dis / metrics.cycles[metrics.n_gcd].delta_q_chg)
+    ce_rounded_proxy = 100 * (round(metrics.cycles[metrics.n_gcd].delta_q_dis, 2) / round(metrics.cycles[metrics.n_gcd].delta_q_chg, 2))
     assert abs(ce_raw - ce_rounded_proxy) > 1e-6, "CE 必须用未取整 ΔQ"
 
     metrics_nonrep_fail = compute_gcd_file_metrics(
@@ -730,7 +730,7 @@ def _selftest(ctx, logger) -> int:
         run_report_path=str(ctx.report_path),
     )
     assert metrics_boundary_bracket.fatal_error is None, "段边界可插值样例不得触发 E5201"
-    assert metrics_boundary_bracket.cycles[1].ok_window is True, "段边界可插值样例应窗口成功"
+    assert metrics_boundary_bracket.cycles[metrics_boundary_bracket.n_gcd].ok_window is True, "段边界可插值样例应窗口成功"
 
     metrics_rep_fail = compute_gcd_file_metrics(
         file_path=str(struct_a / "GCD-11.txt"),
