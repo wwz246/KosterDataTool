@@ -149,13 +149,23 @@ def _collect_skipped_deep_paths(root_path: Path) -> tuple[int, int, list[str]]:
 
 
 
-def _is_non_empty_parse(path: Path) -> bool:
-    try:
-        header, rows_tokens = read_fixed_tab_table(str(path))
-        matrix = tokens_to_float_matrix(header, rows_tokens, file_path=str(path))
-    except Exception:
-        return False
-    return bool(matrix)
+
+def _collect_cycles_from_recognized(
+    file_type: str,
+    recognized_files: list[RecognizedFile],
+    cancel_flag: threading.Event | None,
+) -> list[int]:
+    cycles: list[int] = []
+    for file_obj in recognized_files:
+        if cancel_flag and cancel_flag.is_set():
+            break
+        txt = _safe_read_text(Path(file_obj.path))
+        if txt is None:
+            continue
+        mc = _max_cycle_from_parse_core(file_type, txt, Path(file_obj.path))
+        if mc is not None:
+            cycles.append(mc)
+    return cycles
 
 
 def scan_root(
@@ -190,36 +200,13 @@ def scan_root(
         eis_recognized = _sort_recognized([f for f in root_recognized if f.file_type == "EIS"])
         recognized_count += len(root_recognized)
 
-        cv_files: list[RecognizedFile] = []
-        gcd_files: list[RecognizedFile] = []
-        eis_files: list[RecognizedFile] = []
-        cv_cycles: list[int] = []
-        gcd_cycles: list[int] = []
-        for file_obj in cv_recognized:
-            if cancel_flag and cancel_flag.is_set():
-                break
-            txt = _safe_read_text(Path(file_obj.path))
-            mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
-            if mc is not None:
-                cv_files.append(file_obj)
-                cv_cycles.append(mc)
-        for file_obj in gcd_recognized:
-            if cancel_flag and cancel_flag.is_set():
-                break
-            txt = _safe_read_text(Path(file_obj.path))
-            if txt is None:
-                continue
-            mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
-            if mc is not None:
-                gcd_files.append(file_obj)
-                gcd_cycles.append(mc)
-        for file_obj in eis_recognized:
-            if cancel_flag and cancel_flag.is_set():
-                break
-            if _is_non_empty_parse(Path(file_obj.path)):
-                eis_files.append(file_obj)
+        cv_files = cv_recognized
+        gcd_files = gcd_recognized
+        eis_files = eis_recognized
+        cv_cycles = _collect_cycles_from_recognized("CV", cv_recognized, cancel_flag)
+        gcd_cycles = _collect_cycles_from_recognized("GCD", gcd_recognized, cancel_flag)
 
-        if not (cv_files or gcd_files or eis_files):
+        if not (cv_recognized or gcd_recognized or eis_recognized):
             ignored_invalid_dirs.append(str(root))
         else:
             batteries.append(
@@ -253,36 +240,13 @@ def scan_root(
             eis_recognized = _sort_recognized([f for f in recognized if f.file_type == "EIS"])
             recognized_count += len(recognized)
 
-            cv_files: list[RecognizedFile] = []
-            gcd_files: list[RecognizedFile] = []
-            eis_files: list[RecognizedFile] = []
-            cv_cycles: list[int] = []
-            gcd_cycles: list[int] = []
-            for file_obj in cv_recognized:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                txt = _safe_read_text(Path(file_obj.path))
-                mc = _max_cycle_from_parse_core("CV", txt, Path(file_obj.path)) if txt is not None else None
-                if mc is not None:
-                    cv_files.append(file_obj)
-                    cv_cycles.append(mc)
-            for file_obj in gcd_recognized:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                txt = _safe_read_text(Path(file_obj.path))
-                if txt is None:
-                    continue
-                mc = _max_cycle_from_parse_core("GCD", txt, Path(file_obj.path))
-                if mc is not None:
-                    gcd_files.append(file_obj)
-                    gcd_cycles.append(mc)
-            for file_obj in eis_recognized:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                if _is_non_empty_parse(Path(file_obj.path)):
-                    eis_files.append(file_obj)
+            cv_files = cv_recognized
+            gcd_files = gcd_recognized
+            eis_files = eis_recognized
+            cv_cycles = _collect_cycles_from_recognized("CV", cv_recognized, cancel_flag)
+            gcd_cycles = _collect_cycles_from_recognized("GCD", gcd_recognized, cancel_flag)
 
-            if not (cv_files or gcd_files or eis_files):
+            if not (cv_recognized or gcd_recognized or eis_recognized):
                 ignored_invalid_dirs.append(str(bat_dir.resolve()))
             else:
                 batteries.append(

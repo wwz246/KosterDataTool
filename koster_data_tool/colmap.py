@@ -41,7 +41,10 @@ def _is_density_unit(unit: str) -> bool:
 def _norm_z_token(s: str) -> str:
     t = unicodedata.normalize("NFKC", s or "").lower()
     t = t.replace("′", "'").replace("＇", "'")
-    return re.sub(r"\s+", "", t)
+    t = t.replace("’", "'").replace("\"", "'")
+    t = t.replace("−", "-").replace("–", "-").replace("—", "-")
+    t = re.sub(r"[\s\(\)\[\]{}\\/]", "", t)
+    return t
 
 
 def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
@@ -57,16 +60,11 @@ def map_columns_from_header(header_tokens: list[str]) -> tuple[dict[str, int], d
 
         mapped = None
         ztok = _norm_z_token(token)
-        if (
-            "z''" in ztok
-            or 'z""' in ztok
-            or "-z''" in ztok
-            or "imag" in nn
-            or "虚部" in token
-            or "zim" in nn
-        ):
+        zim_alias = ("z''" in ztok) or ("-z''" in ztok) or ("imag" in nn) or ("虚部" in token) or ("zim" in nn)
+        zre_alias = ("z'" in ztok and "z''" not in ztok) or ("real" in nn) or ("实部" in token) or ("zre" in nn)
+        if zim_alias:
             mapped = "Zim"
-        elif "z'" in ztok or "real" in nn or "实部" in token or "zre" in nn:
+        elif zre_alias:
             mapped = "Zre"
         elif nn in {"frequency", "freq", "频率"} or "frequency" in nn or "freq" in nn or "频率" in nn:
             mapped = "Freq"
