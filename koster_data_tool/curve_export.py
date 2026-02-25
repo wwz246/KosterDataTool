@@ -169,7 +169,7 @@ def export_eis_block(
         src_zim = (mapping.source_header.get("Zim", "") if getattr(mapping, "source_header", None) else "").replace(" ", "")
         src_norm = src_zim.lower().replace("′", "'")
         if "z''" in src_norm or 'z""' in src_norm:
-            msg = "检测到原始虚部列为 Z''，导出时已按约定取负号写为 -Z''"
+            msg = "EIS原数据虚部列为 Z''，导出时已转换为 -Z''"
             logger.info(msg, file=file_path)
             _append_run_report(run_report_path, msg)
         return Block3Header(
