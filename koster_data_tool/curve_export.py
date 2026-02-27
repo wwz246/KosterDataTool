@@ -29,6 +29,7 @@ def export_cv_block(
     m_pos_mg: float,
     m_neg_mg: float,
     p_active_pct: float,
+    current_unit: str,
     logger,
     run_report_path: str,
 ) -> Block3Header:
@@ -55,12 +56,23 @@ def export_cv_block(
         else:
             raise ValueError("CV 缺少电流列")
         voltage = [series["E"][i] for i in idxs]
-        i_sp = [x / m_active for x in cur]
+        if current_unit == "A/g":
+            current_values = [x / m_active for x in cur]
+            header = "Specific Current"
+            unit = "A/g"
+        elif current_unit == "mA":
+            current_values = [x * 1000.0 for x in cur]
+            header = "Current"
+            unit = "mA"
+        else:
+            current_values = list(cur)
+            header = "Current"
+            unit = "A"
         return Block3Header(
-            h1=["Voltage", "Specific Current"],
-            h2=["V", "A/g"],
+            h1=["Voltage", header],
+            h2=["V", unit],
             h3=["", f"{speed} mV/s"],
-            data=[voltage, i_sp],
+            data=[voltage, current_values],
             warnings=[*mapping.warnings, *split_result.warnings],
         )
     except Exception as exc:

@@ -46,6 +46,9 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
         bp = params.get("battery_params", {}).get(b.name, {})
         errs = validate_battery_row(
             output_type=output_type,
+            has_cv=bool(b.cv_files),
+            has_gcd=bool(b.gcd_files),
+            cv_current_unit=params.get("cv_current_unit", "A/g"),
             m_pos=bp.get("m_pos"),
             m_neg=bp.get("m_neg"),
             p_active=bp.get("p_active"),
@@ -84,7 +87,8 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
 
     try:
         emit("生成 Excel", 70.0, "workbook")
-        ele_wb = build_electrode_workbook(scan_result, selections, params, logger, str(ctx.report_path))
+        export_electrode_workbook = scan_result.structure != "A"
+        ele_wb = build_electrode_workbook(scan_result, selections, params, logger, str(ctx.report_path)) if export_electrode_workbook else None
         bat_wb = build_battery_workbook(scan_result, params, logger, str(ctx.report_path)) if params.get("export_battery_workbook", True) else None
     except Exception as exc:
         line = report_error(str(ctx.report_path), "E9001", "生成 Excel 失败", error=str(exc))
@@ -105,7 +109,10 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
     try:
         emit("保存", 85.0, "xlsx")
         electrode_path, battery_path = make_output_paths(root_path, ctx.run_id, params.get("output_type", "Csp"))
-        ele_wb.save(electrode_path)
+        if ele_wb is not None:
+            ele_wb.save(electrode_path)
+        else:
+            electrode_path = ""
         if bat_wb is not None:
             bat_wb.save(battery_path)
     except Exception as exc:
@@ -124,7 +131,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
             "warnings": list(dict.fromkeys([*warnings, *agg_warnings])),
         }
 
-    _append_run_report(str(ctx.report_path), f"electrode_workbook={electrode_path}")
+    _append_run_report(str(ctx.report_path), f"electrode_workbook={electrode_path if electrode_path else '(disabled for structure A)'}")
     _append_run_report(str(ctx.report_path), f"battery_workbook={battery_path if bat_wb is not None else '(disabled)'}")
     agg_failures, agg_warnings = _collect_report_messages(Path(ctx.report_path))
     failures = list(dict.fromkeys([*failures, *agg_failures]))

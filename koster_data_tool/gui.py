@@ -17,7 +17,7 @@ from .param_validation import coerce_int_strict, validate_battery_row, validate_
 from .scanner import ScanResult, scan_root
 from .state_store import read_last_root, write_last_root
 
-WINDOW_TITLE = "科斯特工作站电化学数据处理"
+WINDOW_TITLE = "电化学数据处理"
 
 
 class App:
@@ -49,12 +49,14 @@ class App:
         self.a_geom_var = tk.StringVar(value="1")
         self.export_book_var = tk.BooleanVar(value=True)
         self.open_folder_var = tk.BooleanVar(value=True)
+        self.cv_current_unit_var = tk.StringVar(value="A/g")
         self._blink_job = None
         self._blink_on = False
         self.param_columns = ["name", "cvmax", "gcdmax", "m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
         self.editable_column_keys = ["m_pos", "m_neg", "p_active", "k", "n_cv", "n_gcd", "v_start", "v_end"]
         self.readonly_column_keys = {"name", "cvmax", "gcdmax"}
         self.param_table: CanvasTable | None = None
+        self.file_type_presence = {"cv": False, "gcd": False, "eis": False}
         self.filter_tab_visible = True
         self._final_stage_seen = False
         self._pending_export_result: dict | None = None
@@ -72,15 +74,14 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text=WINDOW_TITLE, font=("Arial", 16, "bold")).pack(anchor="w")
 
-        self.notebook = ttk.Notebook(self.root)
-        self.page1 = ttk.Frame(self.notebook, padding=10)
-        self.page2 = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.page1, text="步骤 1")
-        self.notebook.add(self.page2, text="步骤 2")
-        self.notebook.pack(fill="both", expand=True)
+        self.page_stack = ttk.Frame(self.root)
+        self.page_stack.pack(fill="both", expand=True)
+        self.page1 = ttk.Frame(self.page_stack, padding=10)
+        self.page2 = ttk.Frame(self.page_stack, padding=10)
 
         self._build_step1()
         self._build_step2()
+        self._show_step(1)
 
         bottom = ttk.Frame(self.root, padding=10)
         bottom.pack(fill="x")
@@ -106,7 +107,7 @@ class App:
     def _build_step1(self) -> None:
         actions = ttk.Frame(self.page1)
         actions.pack(fill="x")
-        ttk.Button(actions, text="科斯特数据处理", command=self.choose_root).pack(side="left")
+        ttk.Button(actions, text="选择根目录", command=self.choose_root).pack(side="left")
         self.start_scan_btn = ttk.Button(actions, text="开始扫描", command=self.start_scan, state="disabled")
         self.start_scan_btn.pack(side="left", padx=8)
         self.cancel_scan_btn = ttk.Button(actions, text="取消扫描", command=self.cancel_scan, state="disabled")
@@ -131,8 +132,12 @@ class App:
         ttk.Radiobutton(self.electrode_rate_col_frame, text="比电容不扣电压", variable=self.electrode_rate_csp_col_var, value="csp_noir").pack(side="left", padx=(6, 0))
         ttk.Label(options, text="A_geom").grid(row=1, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.a_geom_var, width=10).grid(row=1, column=1, sticky="w")
-        ttk.Checkbutton(options, text="是否输出电池级工作簿", variable=self.export_book_var).grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(options, text="完成后打开输出文件夹", variable=self.open_folder_var).grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Label(options, text="CV电流单位").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(options, text="A/g", variable=self.cv_current_unit_var, value="A/g", command=self._on_cv_unit_change).grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(options, text="A", variable=self.cv_current_unit_var, value="A", command=self._on_cv_unit_change).grid(row=2, column=2, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(options, text="mA", variable=self.cv_current_unit_var, value="mA", command=self._on_cv_unit_change).grid(row=2, column=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(options, text="是否输出电池级工作簿", variable=self.export_book_var).grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(options, text="完成后打开输出文件夹", variable=self.open_folder_var).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Button(options, text="打开运行报告", command=self.open_run_report_dir).grid(row=0, column=3, padx=(20, 0), sticky="e")
         ttk.Button(options, text="打开跳过清单", command=self.open_skipped_list_dir).grid(row=1, column=3, padx=(20, 0), sticky="e")
 
@@ -212,9 +217,24 @@ class App:
             {"key": "v_start", "title": "V_start(V)", "width": 100},
             {"key": "v_end", "title": "V_end(V)", "width": 100},
         ]
-        if self.output_type_var.get() == "Qsp":
-            return [c for c in all_columns if c["key"] != "k"]
-        return all_columns
+        hidden: set[str] = set()
+        if not self.file_type_presence.get("cv"):
+            hidden.update({"cvmax", "n_cv"})
+        if not self.file_type_presence.get("gcd"):
+            hidden.update({"gcdmax", "n_gcd", "v_start", "v_end"})
+        if self.output_type_var.get() == "Qsp" or self.cv_current_unit_var.get() in {"A", "mA"}:
+            hidden.add("k")
+        if self.cv_current_unit_var.get() in {"A", "mA"}:
+            hidden.update({"m_pos", "m_neg", "p_active"})
+        return [c for c in all_columns if c["key"] not in hidden]
+
+    def _show_step(self, step: int) -> None:
+        self.page1.pack_forget()
+        self.page2.pack_forget()
+        if step == 1:
+            self.page1.pack(fill="both", expand=True)
+        else:
+            self.page2.pack(fill="both", expand=True)
 
     def _on_output_type_change(self):
         if self.param_table is None:
@@ -227,6 +247,12 @@ class App:
             if self.electrode_rate_csp_col_var.get() not in {"csp_noir", "csp_eff"}:
                 self.electrode_rate_csp_col_var.set("csp_noir")
             self.electrode_rate_col_frame.grid()
+        self.param_table.set_columns(self._build_table_columns())
+        self._refresh_error_states()
+
+    def _on_cv_unit_change(self):
+        if self.param_table is None:
+            return
         self.param_table.set_columns(self._build_table_columns())
         self._refresh_error_states()
 
@@ -294,7 +320,7 @@ class App:
                     self.scan_result = payload
                     self._log_recognized_files(payload)
                     self._fill_step2(payload)
-                    self.notebook.select(self.page2)
+                    self._show_step(2)
                     self.start_scan_btn.configure(state="normal")
                     self.cancel_scan_btn.configure(state="disabled")
                 elif kind == "scan_progress":
@@ -342,6 +368,11 @@ class App:
                     )
 
     def _fill_step2(self, result: ScanResult):
+        self.file_type_presence = {
+            "cv": bool(result.available_cv),
+            "gcd": bool(result.available_gcd),
+            "eis": bool(result.available_eis),
+        }
         rows = []
         for b in sorted(result.batteries, key=lambda x: x.name):
             rows.append(
@@ -362,6 +393,13 @@ class App:
         if self.param_table is not None:
             self.param_table.set_rows(rows)
             self.param_table.set_columns(self._build_table_columns())
+        only_eis = self.file_type_presence["eis"] and not self.file_type_presence["cv"] and not self.file_type_presence["gcd"]
+        tab_ids = set(self.sub_notebook.tabs())
+        page_id = str(self.param_page)
+        if only_eis and page_id in tab_ids:
+            self.sub_notebook.forget(self.param_page)
+        elif not only_eis and page_id not in tab_ids:
+            self.sub_notebook.insert(0, self.param_page, text="参数表")
         self._init_filter_lists(result)
         self._load_cache_or_keep()
         self._on_output_type_change()
@@ -424,6 +462,9 @@ class App:
             gcd_max = coerce_int_strict(str(row.get("gcdmax", "")))
             row_errors = validate_battery_row(
                 output_type=self.output_type_var.get(),
+                has_cv=self.file_type_presence.get("cv", False),
+                has_gcd=self.file_type_presence.get("gcd", False),
+                cv_current_unit=self.cv_current_unit_var.get(),
                 m_pos=row.get("m_pos", ""),
                 m_neg=row.get("m_neg", ""),
                 p_active=row.get("p_active", ""),
@@ -459,6 +500,9 @@ class App:
             gcd_max = coerce_int_strict(str(row.get("gcdmax", "")))
             row_errors = validate_battery_row(
                 output_type=output_type,
+                has_cv=self.file_type_presence.get("cv", False),
+                has_gcd=self.file_type_presence.get("gcd", False),
+                cv_current_unit=self.cv_current_unit_var.get(),
                 m_pos=row.get("m_pos", ""),
                 m_neg=row.get("m_neg", ""),
                 p_active=row.get("p_active", ""),
@@ -482,6 +526,7 @@ class App:
             "output_type": self.output_type_var.get(),
             "export_battery_workbook": bool(self.export_book_var.get()),
             "electrode_rate_csp_column": self.electrode_rate_csp_col_var.get() if self.output_type_var.get() == "Csp" else None,
+            "cv_current_unit": self.cv_current_unit_var.get(),
             "battery_params": {},
         }
         first_error = None
@@ -490,9 +535,14 @@ class App:
         for row in self.param_table.rows:
             try:
                 bp = {
-                    "m_pos": float(row["m_pos"]), "m_neg": float(row["m_neg"]), "p_active": float(row["p_active"]),
-                    "k": float(row["k"]) if self.output_type_var.get() == "Csp" else 1.0,
-                    "n_cv": int(row["n_cv"]), "n_gcd": int(row["n_gcd"]), "v_start": float(row["v_start"]), "v_end": float(row["v_end"]),
+                    "m_pos": float(row.get("m_pos", 1.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 1.0,
+                    "m_neg": float(row.get("m_neg", 0.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 0.0,
+                    "p_active": float(row.get("p_active", 100.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 100.0,
+                    "k": float(row.get("k", 1.0)) if self.output_type_var.get() == "Csp" and self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 1.0,
+                    "n_cv": int(row.get("n_cv", 1)) if self.file_type_presence.get("cv", False) else 1,
+                    "n_gcd": int(row.get("n_gcd", 1)) if self.file_type_presence.get("gcd", False) else 1,
+                    "v_start": float(row.get("v_start", 2.5)) if self.file_type_presence.get("gcd", False) else 2.5,
+                    "v_end": float(row.get("v_end", 4.2)) if self.file_type_presence.get("gcd", False) else 4.2,
                 }
                 bp["main_order"] = "先充后放"
                 out["battery_params"][str(row["name"])] = bp
@@ -573,7 +623,7 @@ class App:
 
     def _back_to_step1(self):
         self._save_cache()
-        self.notebook.select(self.page1)
+        self._show_step(1)
 
     def _confirm_export(self):
         if not self.scan_result or not self.selected_root:
