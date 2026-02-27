@@ -760,6 +760,7 @@ def _selftest(ctx, logger) -> int:
         m_pos_mg=10.0,
         m_neg_mg=0.0,
         p_active_pct=90.0,
+        current_unit="A/g",
         logger=logger,
         run_report_path=str(ctx.report_path),
     )
@@ -941,7 +942,7 @@ def _run_curve_one(ctx, logger, args) -> int:
         raise ValueError("--curve-one 文件名必须以 CV-/GCD-/EIS- 开头")
     ftype = m.group(1).upper()
     if ftype == "CV":
-        block = export_cv_block(str(fpath), args.n_cycle, args.a_geom, args.m_pos, args.m_neg, args.p_active, logger, str(ctx.report_path))
+        block = export_cv_block(str(fpath), args.n_cycle, args.a_geom, args.m_pos, args.m_neg, args.p_active, "A/g", logger, str(ctx.report_path))
     elif ftype == "GCD":
         block = export_gcd_block(str(fpath), args.n_cycle, logger, str(ctx.report_path))
     else:

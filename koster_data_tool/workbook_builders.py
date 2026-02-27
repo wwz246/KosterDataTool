@@ -82,6 +82,7 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
     wb = Workbook()
     ws = wb.active
     ws.title = "Rate"
+    cv_current_unit = params.get("cv_current_unit", "A/g")
 
     selected_bats = sorted([b for b in scan_result.batteries if b.name in set(selections.get("batteries", []))], key=lambda x: x.name)
 
@@ -112,7 +113,17 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
                 continue
             bp = params["battery_params"][b.name]
             try:
-                blk = export_cv_block(fp, int(bp.get("n_cv", 1)), float(params.get("a_geom", 1.0)), float(bp.get("m_pos", 0.0)), float(bp.get("m_neg", 0.0)), float(bp.get("p_active", 100.0)), logger, run_report_path)
+                blk = export_cv_block(
+                    fp,
+                    int(bp.get("n_cv", 1)),
+                    float(params.get("a_geom", 1.0)),
+                    float(bp.get("m_pos", 0.0)),
+                    float(bp.get("m_neg", 0.0)),
+                    float(bp.get("p_active", 100.0)),
+                    cv_current_unit,
+                    logger,
+                    run_report_path,
+                )
             except Exception as exc:
                 _record_failure(run_report_path, logger, fp, exc)
                 continue
@@ -239,6 +250,7 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
     wb = Workbook()
     wb.remove(wb.active)
     _build_param_summary_sheet(wb, scan_result, params, logger, run_report_path)
+    cv_current_unit = params.get("cv_current_unit", "A/g")
 
     for b in sorted(scan_result.batteries, key=lambda x: x.name):
         ws = None
@@ -247,7 +259,17 @@ def build_battery_workbook(scan_result, params, logger, run_report_path) -> Work
 
         for f in sorted(b.cv_files, key=lambda x: x.num):
             try:
-                blk = export_cv_block(f.path, int(bp.get("n_cv", 1)), float(params.get("a_geom", 1.0)), float(bp.get("m_pos", 0.0)), float(bp.get("m_neg", 0.0)), float(bp.get("p_active", 100.0)), logger, run_report_path)
+                blk = export_cv_block(
+                    f.path,
+                    int(bp.get("n_cv", 1)),
+                    float(params.get("a_geom", 1.0)),
+                    float(bp.get("m_pos", 0.0)),
+                    float(bp.get("m_neg", 0.0)),
+                    float(bp.get("p_active", 100.0)),
+                    cv_current_unit,
+                    logger,
+                    run_report_path,
+                )
             except Exception as exc:
                 _record_failure(run_report_path, logger, f.path, exc)
                 continue
