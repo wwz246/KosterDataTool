@@ -714,15 +714,13 @@ def _selftest(ctx, logger) -> int:
     after = {p.name for p in struct_b.iterdir() if p.is_file()}
     diff = sorted(after - before)
     assert len(diff) == 2 and all(x.endswith('.xlsx') for x in diff), f"root 新增文件应仅2个xlsx: {diff}"
-    # 报告/日志必须在 data_root/KosterData 且不在 program_dir
+    # 报告/日志必须在 program_dir/KosterData
     for line in run_export.stdout.splitlines():
         if any(line.startswith(k) for k in ("run_report_path=", "log_path=")):
             path = line.split("=", 1)[1].strip()
             path_obj = Path(path).resolve()
             kd_root = ctx.paths.kosterdata_dir.resolve()
-            program_root = ctx.paths.program_dir.resolve()
             assert kd_root in path_obj.parents or path_obj == kd_root, f"非KosterData路径: {path}"
-            assert not (program_root in path_obj.parents or path_obj == program_root), f"不应写入program_dir: {path}"
     xlsx_paths = [struct_b / name for name in diff]
     battery_wb = None
     electrode_wb = None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,7 +10,7 @@ from .logging_utils import DualLogger
 from .paths import get_program_dir
 
 
-FATAL_NOT_WRITABLE_MESSAGE = "数据目录不可写，请设置 KOSTERDATA_HOME 到可写目录后重试"
+FATAL_NOT_WRITABLE_MESSAGE = "程序所在文件夹不可写，请将程序放到可写目录（例如桌面/文档）后重试"
 
 
 @dataclass(frozen=True)
@@ -52,19 +51,8 @@ def _ensure_writable(p: Path) -> None:
         raise PermissionError(FATAL_NOT_WRITABLE_MESSAGE) from e
 
 
-def get_data_root() -> Path:
-    env_home = os.environ.get("KOSTERDATA_HOME", "").strip()
-    if env_home:
-        return Path(env_home).expanduser().resolve()
-    home = Path.home()
-    docs = home / "Documents"
-    if docs.exists():
-        return docs.resolve()
-    return home.resolve()
-
-
 def build_app_paths(program_dir: Path) -> AppPaths:
-    kosterdata_dir = get_data_root() / "KosterData"
+    kosterdata_dir = program_dir / "KosterData"
     return AppPaths(
         program_dir=program_dir,
         kosterdata_dir=kosterdata_dir,
