@@ -14,8 +14,9 @@ from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
 from .canvas_table import CanvasTable
 from .export_pipeline import run_full_export
 from .param_validation import coerce_int_strict, validate_battery_row, validate_global
+from .renamer import run_rename
 from .scanner import ScanResult, scan_root
-from .state_store import read_last_root, write_last_root
+from .state_store import read_last_dir, read_last_root, write_last_dir, write_last_root
 
 WINDOW_TITLE = "电化学数据处理"
 
@@ -108,6 +109,7 @@ class App:
         actions = ttk.Frame(self.page1)
         actions.pack(fill="x")
         ttk.Button(actions, text="选择根目录", command=self.choose_root).pack(side="left")
+        ttk.Button(actions, text="科斯特重命名", command=self.run_koster_rename).pack(side="left", padx=(8, 0))
         self.start_scan_btn = ttk.Button(actions, text="开始扫描", command=self.start_scan, state="disabled")
         self.start_scan_btn.pack(side="left", padx=8)
         self.cancel_scan_btn = ttk.Button(actions, text="取消扫描", command=self.cancel_scan, state="disabled")
@@ -257,6 +259,10 @@ class App:
         self._refresh_error_states()
 
     def _load_default_open_dir(self) -> None:
+        last_dir = read_last_dir(self.ctx.paths.program_dir)
+        if last_dir is not None:
+            self.default_open_dir = last_dir
+            return
         last_root = read_last_root(self.ctx.paths.state_dir)
         if last_root is not None:
             self.default_open_dir = last_root.parent
@@ -275,6 +281,47 @@ class App:
         self.start_scan_btn.configure(state="normal")
         write_last_root(self.ctx.paths.state_dir, self.selected_root)
         self.default_open_dir = self.selected_root.parent
+        write_last_dir(self.ctx.paths.program_dir, self.default_open_dir)
+
+    def run_koster_rename(self) -> None:
+        chosen = filedialog.askdirectory(initialdir=str(self.default_open_dir))
+        if not chosen:
+            return
+        selected_dir = Path(chosen).resolve()
+        self.default_open_dir = selected_dir
+        write_last_dir(self.ctx.paths.program_dir, selected_dir)
+        summary_text, has_conflicts = run_rename(
+            selected_dir,
+            logger=lambda m: self.logger.info("koster_rename", message=m),
+        )
+        if has_conflicts:
+            self._show_rename_log(summary_text)
+            return
+        messagebox.showinfo("科斯特重命名", summary_text)
+
+    def _show_rename_log(self, content: str) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("科斯特重命名日志")
+        win.geometry("960x520")
+
+        frame = ttk.Frame(win, padding=10)
+        frame.pack(fill="both", expand=True)
+        txt = tk.Text(frame, wrap="word")
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ybar.set)
+        txt.pack(side="left", fill="both", expand=True)
+        ybar.pack(side="right", fill="y")
+        txt.insert("1.0", content)
+
+        btns = ttk.Frame(win, padding=(10, 0, 10, 10))
+        btns.pack(fill="x")
+
+        def copy_to_clipboard() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+
+        ttk.Button(btns, text="复制到剪贴板", command=copy_to_clipboard).pack(side="left")
+        ttk.Button(btns, text="关闭", command=win.destroy).pack(side="right")
 
     def start_scan(self) -> None:
         if not self.selected_root:
