@@ -11,6 +11,7 @@ from .curve_export import export_cv_block, export_eis_block, export_gcd_block
 from .excel_writer import FLOAT2_FMT, INT_FMT, blank_col_after, write_block
 from .export_blocks import Block3Header
 from .gcd_window_metrics import compute_gcd_file_metrics
+from .param_visibility import get_visible_param_fields
 from .rate_retention import build_rate_and_retention_for_battery
 
 
@@ -80,29 +81,33 @@ def _build_rate_retention_blocks(battery, params, logger, run_report_path: str, 
 
 def build_electrode_workbook(scan_result, selections, params, logger, run_report_path) -> Workbook:
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Rate"
+    wb.remove(wb.active)
     cv_current_unit = params.get("cv_current_unit", "A/g")
 
     selected_bats = sorted([b for b in scan_result.batteries if b.name in set(selections.get("batteries", []))], key=lambda x: x.name)
 
-    col = 1
-    end_row = 1
-    for b in selected_bats:
-        if not b.gcd_files:
-            continue
-        try:
-            rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=True)
-            if len(rr.rate.h3) >= 2:
-                rr.rate.h3[0] = ""
-                for i in range(1, len(rr.rate.h3)):
-                    rr.rate.h3[i] = b.name
-        except Exception as exc:
-            _record_failure(run_report_path, logger, b.name, exc)
-            rr = type("Tmp", (), {"rate": _empty_curve_block(), "retention": _empty_curve_block()})()
-        ec, er = write_block(ws, col, 1, rr.rate)
-        col = ec
-        end_row = max(end_row, er)
+    has_any_selected_gcd = any(b.gcd_files for b in selected_bats)
+    if has_any_selected_gcd:
+        ws_rate = None
+        col = 1
+        for b in selected_bats:
+            if not b.gcd_files:
+                continue
+            try:
+                rr = _build_rate_retention_blocks(b, params, logger, run_report_path, compact_rate_columns=True)
+                if not rr.rate.data or not rr.rate.data[0]:
+                    continue
+                if len(rr.rate.h3) >= 2:
+                    rr.rate.h3[0] = ""
+                    for i in range(1, len(rr.rate.h3)):
+                        rr.rate.h3[i] = b.name
+            except Exception as exc:
+                _record_failure(run_report_path, logger, b.name, exc)
+                continue
+            if ws_rate is None:
+                ws_rate = wb.create_sheet("Rate")
+            ec, _ = write_block(ws_rate, col, 1, rr.rate)
+            col = ec
 
     for n in selections.get("cv_nums", []):
         ws_cv = None
@@ -170,31 +175,45 @@ def build_electrode_workbook(scan_result, selections, params, logger, run_report
             write_block(ws_e, col, 1, blk)
             col += len(blk.h1)
 
+    if not wb.sheetnames:
+        wb.create_sheet("Sheet1")
     return wb
 
 
 def _build_param_summary_sheet(wb: Workbook, scan_result, params, logger, run_report_path: str):
     ws = wb.create_sheet("参数汇总")
-    cols = ["电池名", "m_pos(mg)", "m_neg(mg)", "p_active(%)", "K(—)", "N_CV", "N_GCD", "V_start(V)", "V_end(V)", "CV最大圈数", "GCD最大圈数", "输出类型(Csp/Qsp)", "主顺序"]
-    for c, name in enumerate(cols, start=1):
+    visible_fields = get_visible_param_fields(
+        {"cv": bool(scan_result.available_cv), "gcd": bool(scan_result.available_gcd), "eis": bool(scan_result.available_eis)},
+        params.get("output_type", "Csp"),
+        params.get("cv_current_unit", "A/g"),
+    )
+    field_defs = [
+        ("name", "电池名", lambda b, bp: b.name),
+        ("m_pos", "m_pos(mg)", lambda b, bp: bp.get("m_pos")),
+        ("m_neg", "m_neg(mg)", lambda b, bp: bp.get("m_neg")),
+        ("p_active", "p_active(%)", lambda b, bp: bp.get("p_active")),
+        ("k", "K(—)", lambda b, bp: bp.get("k") if params.get("output_type") == "Csp" else ""),
+        ("n_cv", "N_CV", lambda b, bp: bp.get("n_cv")),
+        ("n_gcd", "N_GCD", lambda b, bp: bp.get("n_gcd")),
+        ("v_start", "V_start(V)", lambda b, bp: bp.get("v_start")),
+        ("v_end", "V_end(V)", lambda b, bp: bp.get("v_end")),
+        ("cvmax", "CV最大圈数", lambda b, bp: b.cv_max_cycle),
+        ("gcdmax", "GCD最大圈数", lambda b, bp: b.gcd_max_cycle),
+    ]
+    export_fields = [item for item in field_defs if item[0] in visible_fields]
+    fixed_fields = [
+        ("output_type", "输出类型(Csp/Qsp)", lambda b, bp: params.get("output_type")),
+        ("main_order", "主顺序", lambda b, bp: bp.get("main_order", "")),
+    ]
+    all_fields = export_fields + fixed_fields
+    for c, (_, name, _) in enumerate(all_fields, start=1):
         ws.cell(row=1, column=c, value=name)
     row = 2
     all_cycle_rows: list[list] = []
     for b in sorted(scan_result.batteries, key=lambda x: x.name):
         bp = params["battery_params"][b.name]
-        ws.cell(row=row, column=1, value=b.name)
-        ws.cell(row=row, column=2, value=bp.get("m_pos"))
-        ws.cell(row=row, column=3, value=bp.get("m_neg"))
-        ws.cell(row=row, column=4, value=bp.get("p_active"))
-        ws.cell(row=row, column=5, value=bp.get("k") if params.get("output_type") == "Csp" else "")
-        ws.cell(row=row, column=6, value=bp.get("n_cv"))
-        ws.cell(row=row, column=7, value=bp.get("n_gcd"))
-        ws.cell(row=row, column=8, value=bp.get("v_start"))
-        ws.cell(row=row, column=9, value=bp.get("v_end"))
-        ws.cell(row=row, column=10, value=b.cv_max_cycle)
-        ws.cell(row=row, column=11, value=b.gcd_max_cycle)
-        ws.cell(row=row, column=12, value=params.get("output_type"))
-        ws.cell(row=row, column=13, value=bp.get("main_order", ""))
+        for c, (_, _, getter) in enumerate(all_fields, start=1):
+            ws.cell(row=row, column=c, value=getter(b, bp))
         row += 1
 
         for g in b.gcd_files:

@@ -13,10 +13,11 @@ from tkinter import filedialog, messagebox, ttk
 from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
 from .canvas_table import CanvasTable
 from .export_pipeline import run_full_export
+from .param_visibility import get_visible_param_columns
 from .param_validation import coerce_int_strict, validate_battery_row, validate_global
 from .renamer import run_rename
 from .scanner import ScanResult, scan_root
-from .state_store import read_last_dir, read_last_root, write_last_dir, write_last_root
+from .state_store import resolve_initial_dir_from_last_root, write_last_root
 
 WINDOW_TITLE = "电化学数据处理"
 
@@ -206,29 +207,11 @@ class App:
         ttk.Button(btns, text="确定导出", command=self._confirm_export).pack(side="left")
 
     def _build_table_columns(self) -> list[dict]:
-        all_columns = [
-            {"key": "name", "title": "电池名", "width": 140},
-            {"key": "cvmax", "title": "CV最大圈数", "width": 110},
-            {"key": "gcdmax", "title": "GCD最大圈数", "width": 120},
-            {"key": "m_pos", "title": "m_pos(mg)", "width": 100},
-            {"key": "m_neg", "title": "m_neg(mg)", "width": 100},
-            {"key": "p_active", "title": "p_active(%)", "width": 100},
-            {"key": "k", "title": "K(—)", "width": 90},
-            {"key": "n_cv", "title": "N_CV", "width": 90},
-            {"key": "n_gcd", "title": "N_GCD", "width": 90},
-            {"key": "v_start", "title": "V_start(V)", "width": 100},
-            {"key": "v_end", "title": "V_end(V)", "width": 100},
-        ]
-        hidden: set[str] = set()
-        if not self.file_type_presence.get("cv"):
-            hidden.update({"cvmax", "n_cv"})
-        if not self.file_type_presence.get("gcd"):
-            hidden.update({"gcdmax", "n_gcd", "v_start", "v_end"})
-        if self.output_type_var.get() == "Qsp" or self.cv_current_unit_var.get() in {"A", "mA"}:
-            hidden.add("k")
-        if self.cv_current_unit_var.get() in {"A", "mA"}:
-            hidden.update({"m_pos", "m_neg", "p_active"})
-        return [c for c in all_columns if c["key"] not in hidden]
+        return get_visible_param_columns(
+            self.file_type_presence,
+            self.output_type_var.get(),
+            self.cv_current_unit_var.get(),
+        )
 
     def _show_step(self, step: int) -> None:
         self.page1.pack_forget()
@@ -259,15 +242,10 @@ class App:
         self._refresh_error_states()
 
     def _load_default_open_dir(self) -> None:
-        last_dir = read_last_dir(self.ctx.paths.program_dir)
-        if last_dir is not None:
-            self.default_open_dir = last_dir
-            return
-        last_root = read_last_root(self.ctx.paths.state_dir)
-        if last_root is not None:
-            self.default_open_dir = last_root.parent
-            return
-        self.default_open_dir = self.ctx.paths.program_dir
+        self.default_open_dir = resolve_initial_dir_from_last_root(
+            self.ctx.paths.program_dir,
+            self.ctx.paths.program_dir,
+        )
 
     def choose_root(self) -> None:
         chosen = filedialog.askdirectory(initialdir=str(self.default_open_dir))
@@ -279,17 +257,16 @@ class App:
         self.selected_root = new_root
         self.root_path_var.set(str(self.selected_root))
         self.start_scan_btn.configure(state="normal")
-        write_last_root(self.ctx.paths.state_dir, self.selected_root)
-        self.default_open_dir = self.selected_root.parent
-        write_last_dir(self.ctx.paths.program_dir, self.default_open_dir)
+        write_last_root(self.ctx.paths.program_dir, self.selected_root)
+        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.program_dir, self.ctx.paths.program_dir)
 
     def run_koster_rename(self) -> None:
         chosen = filedialog.askdirectory(initialdir=str(self.default_open_dir))
         if not chosen:
             return
         selected_dir = Path(chosen).resolve()
-        self.default_open_dir = selected_dir
-        write_last_dir(self.ctx.paths.program_dir, selected_dir)
+        write_last_root(self.ctx.paths.program_dir, selected_dir)
+        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.program_dir, self.ctx.paths.program_dir)
         summary_text, has_conflicts = run_rename(
             selected_dir,
             logger=lambda m: self.logger.info("koster_rename", message=m),

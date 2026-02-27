@@ -886,7 +886,7 @@ def _run_scan_only(ctx, logger, root_arg: str) -> int:
         cancel_flag=threading.Event(),
         progress_cb=None,
     )
-    write_last_root(ctx.paths.state_dir, root)
+    write_last_root(ctx.paths.program_dir, root)
     _log_recognized_files(logger, result)
 
     print(f"structure={result.structure}")
@@ -1016,7 +1016,7 @@ def _run_export(ctx, logger, args) -> int:
     root = Path(args.root).expanduser().resolve()
     scan_result = scan_root(str(root), str(ctx.paths.program_dir), ctx.run_id, threading.Event(), None)
     _log_recognized_files(logger, scan_result)
-    write_last_root(ctx.paths.state_dir, root)
+    write_last_root(ctx.paths.program_dir, root)
     params = _load_or_default_params(args, scan_result)
     params["a_geom"] = args.a_geom
     params["output_type"] = args.output_type
