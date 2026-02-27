@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .paths import get_program_dir
-from .logging_utils import DualLogger
 from . import __version__
+from .logging_utils import DualLogger
+from .paths import get_program_dir
 
 
-FATAL_NOT_WRITABLE_MESSAGE = "程序所在文件夹不可写，请将程序放到可写目录（例如桌面/文档）后重试"
+FATAL_NOT_WRITABLE_MESSAGE = "数据目录不可写，请设置 KOSTERDATA_HOME 到可写目录后重试"
 
 
 @dataclass(frozen=True)
@@ -19,10 +20,7 @@ class AppPaths:
     kosterdata_dir: Path
     config_dir: Path
     state_dir: Path
-    logs_dir: Path
-    reports_dir: Path
-    cache_dir: Path
-    temp_dir: Path
+    output_dir: Path
 
 
 @dataclass(frozen=True)
@@ -30,8 +28,8 @@ class RunContext:
     run_id: str
     paths: AppPaths
     text_log_path: Path
-    jsonl_log_path: Path
     report_path: Path
+    run_output_path: Path
     run_temp_dir: Path
 
 
@@ -44,40 +42,43 @@ def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def ensure_program_dir_writable(program_dir: Path) -> None:
-    test_path = program_dir / ".__koster_write_test__"
+def _ensure_writable(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+    probe = p / ".__koster_write_test__.txt"
     try:
-        with test_path.open("w", encoding="utf-8") as f:
-            f.write("ok")
-        test_path.unlink(missing_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
     except Exception as e:
         raise PermissionError(FATAL_NOT_WRITABLE_MESSAGE) from e
 
 
+def get_data_root() -> Path:
+    env_home = os.environ.get("KOSTERDATA_HOME", "").strip()
+    if env_home:
+        return Path(env_home).expanduser().resolve()
+    home = Path.home()
+    docs = home / "Documents"
+    if docs.exists():
+        return docs.resolve()
+    return home.resolve()
+
+
 def build_app_paths(program_dir: Path) -> AppPaths:
-    kosterdata_dir = program_dir / "KosterData"
+    kosterdata_dir = get_data_root() / "KosterData"
     return AppPaths(
         program_dir=program_dir,
         kosterdata_dir=kosterdata_dir,
         config_dir=kosterdata_dir / "config",
         state_dir=kosterdata_dir / "state",
-        logs_dir=kosterdata_dir / "logs",
-        reports_dir=kosterdata_dir / "reports",
-        cache_dir=kosterdata_dir / "cache",
-        temp_dir=kosterdata_dir / "temp",
+        output_dir=kosterdata_dir / "output",
     )
 
 
 def create_runtime_dirs(paths: AppPaths) -> None:
+    _ensure_writable(paths.kosterdata_dir)
     _ensure_dir(paths.config_dir)
     _ensure_dir(paths.state_dir)
-    _ensure_dir(paths.logs_dir)
-    _ensure_dir(paths.reports_dir)
-    _ensure_dir(paths.cache_dir)
-    _ensure_dir(paths.temp_dir)
-    last_root_path = paths.state_dir / "last_root.txt"
-    if not last_root_path.exists():
-        last_root_path.write_text("", encoding="utf-8")
+    _ensure_dir(paths.output_dir)
 
 
 def _read_text(p: Path) -> Optional[str]:
@@ -99,7 +100,7 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
     if not last_str:
         _write_text(last_cleanup_path, today.isoformat())
         if logger:
-            logger.info("cleanup: first run, created last_cleanup.txt", date=today.isoformat())
+            logger.info("cleanup: first run", date=today.isoformat())
         return
 
     try:
@@ -113,72 +114,61 @@ def cleanup_if_due(paths: AppPaths, logger: Optional[DualLogger] = None) -> None
         return
 
     cutoff_ts = (datetime.now() - timedelta(days=30)).timestamp()
-    targets = [paths.logs_dir, paths.reports_dir, paths.cache_dir, paths.temp_dir]
-
     deleted_files = 0
-    deleted_dirs = 0
 
-    for base in targets:
-        if not base.exists():
-            continue
-        for file_path in base.rglob("*"):
-            if file_path.is_file():
-                try:
-                    if file_path.stat().st_mtime < cutoff_ts:
-                        file_path.unlink(missing_ok=True)
-                        deleted_files += 1
-                except Exception as e:
-                    if logger:
-                        logger.warning("cleanup: failed to delete file", path=str(file_path), error=str(e))
-        for dir_path in sorted([p for p in base.rglob("*") if p.is_dir()], key=lambda x: len(str(x)), reverse=True):
-            try:
-                if not any(dir_path.iterdir()):
-                    dir_path.rmdir()
-                    deleted_dirs += 1
-            except Exception:
-                pass
+    for file_path in paths.output_dir.glob("run_*.txt"):
+        try:
+            if file_path.stat().st_mtime < cutoff_ts:
+                file_path.unlink(missing_ok=True)
+                deleted_files += 1
+        except Exception as e:
+            if logger:
+                logger.warning("cleanup: failed", path=str(file_path), error=str(e))
 
     _write_text(last_cleanup_path, today.isoformat())
     if logger:
-        logger.info("cleanup: done", deleted_files=deleted_files, deleted_dirs=deleted_dirs, date=today.isoformat())
-
-
+        logger.info("cleanup: done", deleted_files=deleted_files, date=today.isoformat())
 
 
 def load_optional_config(paths: AppPaths, logger: Optional[DualLogger] = None) -> dict[str, str]:
-    cfg = paths.config_dir / "config.yaml"
+    cfg = paths.config_dir / "config.txt"
     out: dict[str, str] = {}
     if not cfg.exists():
         if logger:
-            logger.info("config: default (no config.yaml)", path=str(cfg))
+            logger.info("config: default (no config.txt)", path=str(cfg))
         return out
     for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
         t = line.strip()
-        if not t or t.startswith("#") or ":" not in t:
+        if not t or t.startswith("#"):
             continue
-        k, v = t.split(":", 1)
+        if "=" in t:
+            k, v = t.split("=", 1)
+        elif ":" in t:
+            k, v = t.split(":", 1)
+        else:
+            continue
         out[k.strip()] = v.strip()
     if logger:
         logger.info("config: loaded", path=str(cfg), keys=list(out.keys()))
     return out
 
+
 def init_run_context() -> Tuple[RunContext, DualLogger]:
     program_dir = get_program_dir()
-    ensure_program_dir_writable(program_dir)
-
     paths = build_app_paths(program_dir)
     create_runtime_dirs(paths)
 
     run_id = make_run_id()
-    text_log_path = paths.logs_dir / f"run_{run_id}.log"
-    jsonl_log_path = paths.logs_dir / f"run_{run_id}.jsonl"
-    report_path = paths.reports_dir / f"run_{run_id}_report.txt"
-    run_temp_dir = paths.temp_dir / f"run_{run_id}"
+    run_output_path = paths.output_dir / f"run_{run_id}.txt"
+    report_path = paths.output_dir / f"run_{run_id}_report.txt"
+    text_log_path = paths.output_dir / f"run_{run_id}_log.txt"
     report_path.touch(exist_ok=True)
+    run_output_path.touch(exist_ok=True)
+    run_temp_dir = paths.output_dir / f"run_{run_id}_tmp"
     run_temp_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = DualLogger(text_log_path=text_log_path, jsonl_log_path=jsonl_log_path)
-    logger.info("startup", run_id=run_id, program_dir=str(program_dir), mode="unknown", version=__version__)
+    logger = DualLogger(text_log_path=text_log_path)
+    logger.info("startup", run_id=run_id, program_dir=str(program_dir), data_root=str(paths.kosterdata_dir), mode="unknown", version=__version__)
 
     cleanup_if_due(paths, logger=logger)
     _ = load_optional_config(paths, logger=logger)
@@ -187,8 +177,8 @@ def init_run_context() -> Tuple[RunContext, DualLogger]:
         run_id=run_id,
         paths=paths,
         text_log_path=text_log_path,
-        jsonl_log_path=jsonl_log_path,
         report_path=report_path,
+        run_output_path=run_output_path,
         run_temp_dir=run_temp_dir,
     )
     return ctx, logger

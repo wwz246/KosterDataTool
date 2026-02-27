@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import queue
 import re
@@ -178,11 +177,12 @@ class App:
             text="质量口径提示：半电池其中一侧质量请填 0；质量均为不含集流体的活性层质量。",
             foreground="#444444",
         ).pack(anchor="w", pady=(0, 4))
-        ttk.Label(
+        self.k_hint_label = ttk.Label(
             self.param_page,
             text="K 为换算系数：K=1 按整体器件直接计算；K=2 按两电极/单侧口径进行一次换算；K=4（推荐默认）按对称器件换算到单电极材料口径。不确定时先填 4。",
             foreground="#1f4e79",
-        ).pack(anchor="w", pady=(0, 6))
+        )
+        self.k_hint_label.pack(anchor="w", pady=(0, 6))
 
         table_wrap = ttk.Frame(self.param_page)
         table_wrap.pack(fill="both", expand=True)
@@ -253,8 +253,10 @@ class App:
             if self.electrode_rate_csp_col_var.get() not in {"csp_noir", "csp_eff"}:
                 self.electrode_rate_csp_col_var.set("csp_noir")
             self.electrode_rate_col_frame.grid()
+            self.k_hint_label.pack(anchor="w", pady=(0, 6))
         else:
             self.electrode_rate_col_frame.grid_remove()
+            self.k_hint_label.pack_forget()
 
         if has_cv:
             self.cv_unit_label.grid()
@@ -302,8 +304,8 @@ class App:
 
     def _load_default_open_dir(self) -> None:
         self.default_open_dir = resolve_initial_dir_from_last_root(
-            self.ctx.paths.program_dir,
-            self.ctx.paths.program_dir,
+            self.ctx.paths.state_dir,
+            self.ctx.paths.state_dir,
         )
 
     def choose_root(self) -> None:
@@ -316,16 +318,16 @@ class App:
         self.selected_root = new_root
         self.root_path_var.set(str(self.selected_root))
         self.start_scan_btn.configure(state="normal")
-        write_last_root(self.ctx.paths.program_dir, self.selected_root)
-        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.program_dir, self.ctx.paths.program_dir)
+        write_last_root(self.ctx.paths.state_dir, self.selected_root)
+        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.state_dir, self.ctx.paths.state_dir)
 
     def run_koster_rename(self) -> None:
         chosen = filedialog.askdirectory(initialdir=str(self.default_open_dir))
         if not chosen:
             return
         selected_dir = Path(chosen).resolve()
-        write_last_root(self.ctx.paths.program_dir, selected_dir)
-        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.program_dir, self.ctx.paths.program_dir)
+        write_last_root(self.ctx.paths.state_dir, selected_dir)
+        self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.state_dir, self.ctx.paths.state_dir)
         summary_text, has_conflicts = run_rename(
             selected_dir,
             logger=lambda m: self.logger.info("koster_rename", message=m),
@@ -377,7 +379,7 @@ class App:
         def progress_cb(stage: str, current: str, percent: float, bcnt: int, rcnt: int, sdcnt: int, sfcnt: int) -> None:
             self.msg_q.put(("scan_progress", (stage, current, percent, bcnt, rcnt, sdcnt, sfcnt)))
 
-        result = scan_root(str(self.selected_root), str(self.ctx.paths.program_dir), self.ctx.run_id, self.cancel_event, progress_cb)
+        result = scan_root(str(self.selected_root), str(self.ctx.paths.output_dir), self.ctx.run_id, self.cancel_event, progress_cb)
         self.msg_q.put(("done", result))
 
     def _reset_scan_result_state(self) -> None:
@@ -647,39 +649,54 @@ class App:
         }
 
     def _cache_path(self):
-        return self.ctx.paths.cache_dir / "ui_cache.json"
+        return self.ctx.paths.state_dir / "ui_cache.txt"
 
     def _drop_cache_for_root(self, root_key: str) -> None:
         cp = self._cache_path()
         if not cp.exists():
             return
         try:
-            obj = json.loads(cp.read_text(encoding="utf-8"))
+            lines = cp.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             cp.unlink(missing_ok=True)
             return
-        if root_key in obj:
-            obj.pop(root_key, None)
-            cp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        root_line = next((x for x in lines if x.startswith("root=")), "")
+        cached_root = root_line.split("=", 1)[1] if "=" in root_line else ""
+        if cached_root == root_key:
+            cp.unlink(missing_ok=True)
 
     def _load_cache_or_keep(self):
         cp = self._cache_path()
         if not cp.exists() or not self.selected_root:
             return
-        obj = json.loads(cp.read_text(encoding="utf-8"))
-        cur = obj.get(str(self.selected_root))
-        if not cur:
+        lines = cp.read_text(encoding="utf-8", errors="ignore").splitlines()
+        root_line = next((x for x in lines if x.startswith("root=")), "")
+        cached_root = root_line.split("=", 1)[1] if "=" in root_line else ""
+        if cached_root != str(self.selected_root):
             return
-        vals = cur.get("rows", [])
-        col_choice = cur.get("electrode_rate_csp_column")
+        col_line = next((x for x in lines if x.startswith("electrode_rate_csp_column=")), "")
+        col_choice = col_line.split("=", 1)[1] if "=" in col_line else ""
         if col_choice in {"csp_noir", "csp_eff"}:
             self.electrode_rate_csp_col_var.set(col_choice)
         if self.param_table is None:
             return
-        for row_idx, row in enumerate(vals):
-            if row_idx >= len(self.param_table.rows):
-                break
-            self.param_table.rows[row_idx].update(row)
+        row_map: dict[int, dict[str, str]] = {}
+        for line in lines:
+            if not line.startswith("row|"):
+                continue
+            parts = line.split("|", 3)
+            if len(parts) != 4:
+                continue
+            try:
+                idx = int(parts[1])
+            except Exception:
+                continue
+            key = parts[2]
+            val = parts[3]
+            row_map.setdefault(idx, {})[key] = val
+        for row_idx, row_vals in row_map.items():
+            if 0 <= row_idx < len(self.param_table.rows):
+                self.param_table.rows[row_idx].update(row_vals)
         self.param_table.redraw()
 
     def _save_cache(self):
@@ -687,15 +704,15 @@ class App:
             return
         cp = self._cache_path()
         cp.parent.mkdir(parents=True, exist_ok=True)
-        obj = {}
-        if cp.exists():
-            obj = json.loads(cp.read_text(encoding="utf-8"))
         rows = self.param_table.rows if self.param_table is not None else []
-        obj[str(self.selected_root)] = {
-            "rows": rows,
-            "electrode_rate_csp_column": self.electrode_rate_csp_col_var.get(),
-        }
-        cp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        out_lines = [
+            f"root={self.selected_root}",
+            f"electrode_rate_csp_column={self.electrode_rate_csp_col_var.get()}",
+        ]
+        for i, row in enumerate(rows):
+            for k, v in row.items():
+                out_lines.append(f"row|{i}|{k}|{v}")
+        cp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
 
     def _clear_cache(self):
         cp = self._cache_path()
@@ -750,29 +767,59 @@ class App:
         if "error" in result:
             messagebox.showerror(WINDOW_TITLE, result["error"])
             return
-        report_lines = []
+
+        report_lines: list[str] = []
         try:
             report_lines = Path(result["run_report_path"]).read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             report_lines = []
+
         rep_failures = [x for x in report_lines if x.startswith("E") or x.startswith("文件失败:") or " 文件失败 " in x]
-        rep_warnings = [x for x in report_lines if x.startswith("W")]
-        merged = list(dict.fromkeys([*(result.get("failures", []) or []), *(result.get("warnings", []) or []), *rep_failures, *rep_warnings]))
-        skipped_file = self.ctx.paths.reports_dir / f"skipped_paths-{self.ctx.run_id}.txt"
-        lines = [
-            f"根目录: {self.selected_root}",
-            f"极片级: {Path(result['electrode_path']).name}",
-            f"电池级: {Path(result['battery_path']).name if result['battery_path'] else '(disabled)'}",
-            f"运行报告: {result['run_report_path']}",
-            f"日志: {result['log_path']}",
-            f"skipped_paths: {skipped_file}",
-            "失败/告警(前50，完整见运行报告):",
-        ]
-        for x in merged[:50]:
-            lines.append(f"- {x}")
-        messagebox.showinfo(WINDOW_TITLE, "\n".join(lines))
+        merged_failures = list(dict.fromkeys([*(result.get("failures", []) or []), *rep_failures]))
+
+        total_files = int(getattr(self.scan_result, "recognized_file_count", 0) or 0)
+        failed_count = len(merged_failures)
+        success_count = max(total_files - failed_count, 0)
+
+        self._show_export_result_dialog(
+            success_count=success_count,
+            failed_count=failed_count,
+            failed_log_path=Path(result["run_report_path"]),
+        )
+
         if self.open_folder_var.get() and self.selected_root:
-            self._open_directory(self.selected_root, Path(result["electrode_path"]))
+            fallback = Path(result["electrode_path"]) if result.get("electrode_path") else Path(result["run_report_path"])
+            self._open_directory(self.selected_root, fallback)
+
+    def _show_export_result_dialog(self, success_count: int, failed_count: int, failed_log_path: Path) -> None:
+        win = tk.Toplevel(self.root)
+        win.title(WINDOW_TITLE)
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"处理完成：成功 {success_count}，失败 {failed_count}").pack(anchor="w")
+
+        btns = ttk.Frame(body)
+        btns.pack(fill="x", pady=(12, 0))
+
+        if failed_count > 0:
+            ttk.Button(btns, text="打开失败日志", command=lambda: self._open_path(failed_log_path)).pack(side="left")
+
+        ttk.Button(btns, text="确定", command=win.destroy).pack(side="right")
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))
+            elif os.name == "posix":
+                subprocess.Popen(["xdg-open", str(path)])
+            else:
+                raise RuntimeError("unsupported platform")
+        except Exception:
+            messagebox.showinfo(WINDOW_TITLE, f"无法打开，请手动查看：\n{path}")
 
     def _open_directory(self, dir_path: Path, fallback_file: Path) -> None:
         try:
@@ -789,7 +836,7 @@ class App:
         self._open_directory(self.ctx.report_path.parent, self.ctx.report_path)
 
     def open_skipped_list_dir(self) -> None:
-        skipped_file = self.ctx.paths.reports_dir / f"skipped_paths-{self.ctx.run_id}.txt"
+        skipped_file = self.ctx.paths.output_dir / f"run_{self.ctx.run_id}_skipped_paths.txt"
         self._open_directory(skipped_file.parent, skipped_file)
 
 
