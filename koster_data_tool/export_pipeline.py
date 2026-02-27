@@ -68,7 +68,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
         for item in all_errors:
             _append_run_report(str(ctx.report_path), f"FATAL 参数校验失败: {item}")
         logger.error("参数校验失败，禁止导出", errors=all_errors, stage="validation")
-        raise ValueError("参数校验失败，详见 run_report.txt 与 jsonl")
+        raise ValueError("参数校验失败，详见 run_report.txt")
 
     emit("逐文件解析/分圈/选圈", 20.0, "all")
     for b in scan_result.batteries:
@@ -100,8 +100,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
             "battery_path": "",
             "run_report_path": str(ctx.report_path),
             "log_path": str(ctx.text_log_path),
-            "jsonl_log_path": str(ctx.jsonl_log_path),
-            "skipped_paths_path": str(ctx.paths.reports_dir / f"skipped_paths-{ctx.run_id}.txt"),
+            "skipped_paths_path": str(ctx.paths.output_dir / f"run_{ctx.run_id}_skipped_paths.txt"),
             "failures": list(dict.fromkeys([*failures, *agg_failures])),
             "warnings": list(dict.fromkeys([*warnings, *agg_warnings])),
         }
@@ -125,8 +124,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
             "battery_path": "",
             "run_report_path": str(ctx.report_path),
             "log_path": str(ctx.text_log_path),
-            "jsonl_log_path": str(ctx.jsonl_log_path),
-            "skipped_paths_path": str(ctx.paths.reports_dir / f"skipped_paths-{ctx.run_id}.txt"),
+            "skipped_paths_path": str(ctx.paths.output_dir / f"run_{ctx.run_id}_skipped_paths.txt"),
             "failures": list(dict.fromkeys([*failures, *agg_failures])),
             "warnings": list(dict.fromkeys([*warnings, *agg_warnings])),
         }
@@ -144,8 +142,7 @@ def run_full_export(root_path: str, scan_result, params, selections, ctx, logger
         "battery_path": battery_path if bat_wb is not None else "",
         "run_report_path": str(ctx.report_path),
         "log_path": str(ctx.text_log_path),
-        "jsonl_log_path": str(ctx.jsonl_log_path),
-        "skipped_paths_path": str(ctx.paths.reports_dir / f"skipped_paths-{ctx.run_id}.txt"),
+        "skipped_paths_path": str(ctx.paths.output_dir / f"run_{ctx.run_id}_skipped_paths.txt"),
         "failures": failures,
         "warnings": warnings,
     }

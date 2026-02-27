@@ -324,8 +324,6 @@ def compute_one_cycle_metrics(
     delta_v_noir = v_end - v_start
     if output_type == "Csp" and (k_factor is None or k_factor <= 0):
         raise ValueError("Csp 模式下 k_factor 必须>0")
-    if output_type == "Qsp" and k_factor is not None:
-        raise ValueError("Qsp 模式下不得传 k_factor")
 
     wt1 = clip_segment_by_voltage_window(**seg1_raw, assist_global_indices=assist_global_indices)
     wt2 = clip_segment_by_voltage_window(**seg2_raw, assist_global_indices=assist_global_indices)
@@ -464,9 +462,6 @@ def compute_gcd_file_metrics(
     )
     split_result = split_cycles("GCD", has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
     max_cycle = split_result.max_cycle or 0
-    if n_gcd <= 1 and max_cycle >= 2:
-        n_gcd = 2
-
     def _build_seg_current(idxs: list[int]) -> list[float]:
         if "I" in series:
             return [series["I"][i] for i in idxs]
@@ -488,7 +483,7 @@ def compute_gcd_file_metrics(
     all_cycle_segments = []
     per_cycle_indices: dict[int, list[int]] = {}
     first_cycle_assist_indices = split_result.cycles.get(1, []) if 1 in split_result.cycles else []
-    for k in range(2, max_cycle + 1):
+    for k in range(1, max_cycle + 1):
         idxs = split_result.cycles.get(k, [])
         per_cycle_indices[k] = idxs
         if not idxs:

@@ -170,15 +170,15 @@ def _collect_cycles_from_recognized(
 
 def scan_root(
     root_path: str,
-    program_dir: str,
+    output_dir: str,
     run_id: str,
     cancel_flag: threading.Event | None,
     progress_cb: Callable[[str, str, float, int, int, int, int], None] | None,
 ) -> ScanResult:
     root = Path(root_path).expanduser().resolve()
-    reports_dir = Path(program_dir).resolve() / "KosterData" / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    skipped_report_path = reports_dir / f"skipped_paths-{run_id}.txt"
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    skipped_report_path = out_dir / f"run_{run_id}_skipped_paths.txt"
 
     def emit(stage: str, current: str, percent: float, bcnt: int, rcnt: int, sdcnt: int, sfcnt: int) -> None:
         if progress_cb:
