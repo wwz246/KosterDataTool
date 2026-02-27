@@ -18,20 +18,26 @@ PARAM_COLUMNS = [
 
 
 def get_visible_param_fields(file_type_presence: Mapping[str, bool], output_type: str, cv_current_unit: str) -> list[str]:
-    hidden: set[str] = set()
     has_cv = bool(file_type_presence.get("cv"))
     has_gcd = bool(file_type_presence.get("gcd"))
 
-    if not has_cv:
-        hidden.update({"cvmax", "n_cv"})
-    if not has_gcd:
-        hidden.update({"gcdmax", "n_gcd", "v_start", "v_end"})
-    if output_type == "Qsp" or cv_current_unit in {"A", "mA"}:
-        hidden.add("k")
-    if cv_current_unit in {"A", "mA"}:
-        hidden.update({"m_pos", "m_neg", "p_active"})
+    if not has_cv and not has_gcd:
+        return []
 
-    return [c["key"] for c in PARAM_COLUMNS if c["key"] not in hidden]
+    show_mass_related = has_gcd or (has_cv and cv_current_unit == "A/g")
+    show_k = has_gcd and output_type == "Csp"
+
+    visible: list[str] = ["name"]
+    if has_cv:
+        visible.extend(["cvmax", "n_cv"])
+    if has_gcd:
+        visible.extend(["gcdmax", "n_gcd", "v_start", "v_end"])
+    if show_mass_related:
+        visible.extend(["m_pos", "m_neg", "p_active"])
+    if show_k:
+        visible.append("k")
+
+    return [c["key"] for c in PARAM_COLUMNS if c["key"] in set(visible)]
 
 
 def get_visible_param_columns(file_type_presence: Mapping[str, bool], output_type: str, cv_current_unit: str) -> list[dict]:

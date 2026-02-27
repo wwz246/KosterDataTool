@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from .bootstrap import FATAL_NOT_WRITABLE_MESSAGE, init_run_context
 from .canvas_table import CanvasTable
 from .export_pipeline import run_full_export
-from .param_visibility import get_visible_param_columns
+from .param_visibility import get_visible_param_columns, get_visible_param_fields
 from .param_validation import coerce_int_strict, validate_battery_row, validate_global
 from .renamer import run_rename
 from .scanner import ScanResult, scan_root
@@ -70,13 +70,17 @@ class App:
     def _build_ui(self) -> None:
         self.root.title(WINDOW_TITLE)
         self.root.geometry("1180x760")
+        self.root.minsize(1080, 680)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        top = ttk.Frame(self.root, padding=10)
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill="both", expand=True)
+
+        top = ttk.Frame(self.main_frame, padding=10)
         top.pack(fill="x")
         ttk.Label(top, text=WINDOW_TITLE, font=("Arial", 16, "bold")).pack(anchor="w")
 
-        self.page_stack = ttk.Frame(self.root)
+        self.page_stack = ttk.Frame(self.main_frame)
         self.page_stack.pack(fill="both", expand=True)
         self.page1 = ttk.Frame(self.page_stack, padding=10)
         self.page2 = ttk.Frame(self.page_stack, padding=10)
@@ -85,8 +89,10 @@ class App:
         self._build_step2()
         self._show_step(1)
 
-        bottom = ttk.Frame(self.root, padding=10)
-        bottom.pack(fill="x")
+        self.bottom_bar = ttk.Frame(self.root, padding=10)
+        self.bottom_bar.pack(side="bottom", fill="x")
+
+        bottom = self.bottom_bar
         ttk.Label(bottom, text="阶段:").pack(side="left")
         ttk.Label(bottom, textvariable=self.stage_var).pack(side="left", padx=(4, 12))
         ttk.Label(bottom, text="当前对象:").pack(side="left")
@@ -125,20 +131,29 @@ class App:
         options = ttk.LabelFrame(self.page2, text="全局选项", padding=10)
         options.pack(fill="x")
         ttk.Label(self.page2, text="提示：R_turn 不是 RΩ，也不是 EIS 的 Rs；它是换向点表观ESR(DC)，用于工程对比。", foreground="#8a4b00").pack(anchor="w", pady=(6, 6))
-        ttk.Label(options, text="输出类型").grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(options, text="Csp", variable=self.output_type_var, value="Csp", command=self._on_output_type_change).grid(row=0, column=1, sticky="w")
-        ttk.Radiobutton(options, text="Qsp", variable=self.output_type_var, value="Qsp", command=self._on_output_type_change).grid(row=0, column=2, sticky="w")
+        self.output_type_label = ttk.Label(options, text="输出类型")
+        self.output_type_label.grid(row=0, column=0, sticky="w")
+        self.output_type_rb_csp = ttk.Radiobutton(options, text="Csp", variable=self.output_type_var, value="Csp", command=self._on_output_type_change)
+        self.output_type_rb_csp.grid(row=0, column=1, sticky="w")
+        self.output_type_rb_qsp = ttk.Radiobutton(options, text="Qsp", variable=self.output_type_var, value="Qsp", command=self._on_output_type_change)
+        self.output_type_rb_qsp.grid(row=0, column=2, sticky="w")
         self.electrode_rate_col_frame = ttk.Frame(options)
         self.electrode_rate_col_frame.grid(row=0, column=4, padx=(16, 0), sticky="w")
         ttk.Label(self.electrode_rate_col_frame, text="极片级 Rate(Csp) 输出列").pack(side="left")
         ttk.Radiobutton(self.electrode_rate_col_frame, text="比电容扣电压", variable=self.electrode_rate_csp_col_var, value="csp_eff").pack(side="left", padx=(6, 0))
         ttk.Radiobutton(self.electrode_rate_col_frame, text="比电容不扣电压", variable=self.electrode_rate_csp_col_var, value="csp_noir").pack(side="left", padx=(6, 0))
-        ttk.Label(options, text="A_geom").grid(row=1, column=0, sticky="w")
-        ttk.Entry(options, textvariable=self.a_geom_var, width=10).grid(row=1, column=1, sticky="w")
-        ttk.Label(options, text="CV电流单位").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Radiobutton(options, text="A/g", variable=self.cv_current_unit_var, value="A/g", command=self._on_cv_unit_change).grid(row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Radiobutton(options, text="A", variable=self.cv_current_unit_var, value="A", command=self._on_cv_unit_change).grid(row=2, column=2, sticky="w", pady=(6, 0))
-        ttk.Radiobutton(options, text="mA", variable=self.cv_current_unit_var, value="mA", command=self._on_cv_unit_change).grid(row=2, column=3, sticky="w", pady=(6, 0))
+        self.a_geom_label = ttk.Label(options, text="A_geom")
+        self.a_geom_label.grid(row=1, column=0, sticky="w")
+        self.a_geom_entry = ttk.Entry(options, textvariable=self.a_geom_var, width=10)
+        self.a_geom_entry.grid(row=1, column=1, sticky="w")
+        self.cv_unit_label = ttk.Label(options, text="CV电流单位")
+        self.cv_unit_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.cv_unit_rb_ag = ttk.Radiobutton(options, text="A/g", variable=self.cv_current_unit_var, value="A/g", command=self._on_cv_unit_change)
+        self.cv_unit_rb_ag.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        self.cv_unit_rb_a = ttk.Radiobutton(options, text="A", variable=self.cv_current_unit_var, value="A", command=self._on_cv_unit_change)
+        self.cv_unit_rb_a.grid(row=2, column=2, sticky="w", pady=(6, 0))
+        self.cv_unit_rb_ma = ttk.Radiobutton(options, text="mA", variable=self.cv_current_unit_var, value="mA", command=self._on_cv_unit_change)
+        self.cv_unit_rb_ma.grid(row=2, column=3, sticky="w", pady=(6, 0))
         ttk.Checkbutton(options, text="是否输出电池级工作簿", variable=self.export_book_var).grid(row=3, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(options, text="完成后打开输出文件夹", variable=self.open_folder_var).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Button(options, text="打开运行报告", command=self.open_run_report_dir).grid(row=0, column=3, padx=(20, 0), sticky="e")
@@ -206,12 +221,59 @@ class App:
         ttk.Button(btns, text="清空缓存", command=self._clear_cache).pack(side="left", padx=8)
         ttk.Button(btns, text="确定导出", command=self._confirm_export).pack(side="left")
 
+    def _visible_param_fields(self) -> list[str]:
+        return get_visible_param_fields(
+            self.file_type_presence,
+            self.output_type_var.get(),
+            self.cv_current_unit_var.get(),
+        )
+
     def _build_table_columns(self) -> list[dict]:
         return get_visible_param_columns(
             self.file_type_presence,
             self.output_type_var.get(),
             self.cv_current_unit_var.get(),
         )
+
+    def _refresh_option_visibility(self) -> None:
+        has_cv = self.file_type_presence.get("cv", False)
+        has_gcd = self.file_type_presence.get("gcd", False)
+
+        if has_gcd:
+            self.output_type_label.grid()
+            self.output_type_rb_csp.grid()
+            self.output_type_rb_qsp.grid()
+        else:
+            self.output_type_label.grid_remove()
+            self.output_type_rb_csp.grid_remove()
+            self.output_type_rb_qsp.grid_remove()
+            self.output_type_var.set("Csp")
+
+        if has_gcd and self.output_type_var.get() == "Csp":
+            if self.electrode_rate_csp_col_var.get() not in {"csp_noir", "csp_eff"}:
+                self.electrode_rate_csp_col_var.set("csp_noir")
+            self.electrode_rate_col_frame.grid()
+        else:
+            self.electrode_rate_col_frame.grid_remove()
+
+        if has_cv:
+            self.cv_unit_label.grid()
+            self.cv_unit_rb_ag.grid()
+            self.cv_unit_rb_a.grid()
+            self.cv_unit_rb_ma.grid()
+        else:
+            self.cv_unit_label.grid_remove()
+            self.cv_unit_rb_ag.grid_remove()
+            self.cv_unit_rb_a.grid_remove()
+            self.cv_unit_rb_ma.grid_remove()
+            self.cv_current_unit_var.set("A/g")
+
+        if has_cv or has_gcd:
+            self.a_geom_label.grid()
+            self.a_geom_entry.grid()
+        else:
+            self.a_geom_label.grid_remove()
+            self.a_geom_entry.grid_remove()
 
     def _show_step(self, step: int) -> None:
         self.page1.pack_forget()
@@ -227,17 +289,14 @@ class App:
         if self.output_type_var.get() == "Qsp":
             for row in self.param_table.rows:
                 row["k"] = 1
-            self.electrode_rate_col_frame.grid_remove()
-        else:
-            if self.electrode_rate_csp_col_var.get() not in {"csp_noir", "csp_eff"}:
-                self.electrode_rate_csp_col_var.set("csp_noir")
-            self.electrode_rate_col_frame.grid()
+        self._refresh_option_visibility()
         self.param_table.set_columns(self._build_table_columns())
         self._refresh_error_states()
 
     def _on_cv_unit_change(self):
         if self.param_table is None:
             return
+        self._refresh_option_visibility()
         self.param_table.set_columns(self._build_table_columns())
         self._refresh_error_states()
 
@@ -414,6 +473,7 @@ class App:
                     "v_end": self.default_row_values["v_end"],
                 }
             )
+        self._refresh_option_visibility()
         if self.param_table is not None:
             self.param_table.set_rows(rows)
             self.param_table.set_columns(self._build_table_columns())
@@ -556,13 +616,14 @@ class App:
         first_error = None
         if self.param_table is None:
             return out
+        visible_fields = set(self._visible_param_fields())
         for row in self.param_table.rows:
             try:
                 bp = {
-                    "m_pos": float(row.get("m_pos", 1.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 1.0,
-                    "m_neg": float(row.get("m_neg", 0.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 0.0,
-                    "p_active": float(row.get("p_active", 100.0)) if self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 100.0,
-                    "k": float(row.get("k", 1.0)) if self.output_type_var.get() == "Csp" and self.file_type_presence.get("cv", False) and self.cv_current_unit_var.get() == "A/g" else 1.0,
+                    "m_pos": float(row.get("m_pos", 1.0)) if "m_pos" in visible_fields else 1.0,
+                    "m_neg": float(row.get("m_neg", 0.0)) if "m_neg" in visible_fields else 0.0,
+                    "p_active": float(row.get("p_active", 100.0)) if "p_active" in visible_fields else 100.0,
+                    "k": float(row.get("k", 1.0)) if "k" in visible_fields else 1.0,
                     "n_cv": int(row.get("n_cv", 1)) if self.file_type_presence.get("cv", False) else 1,
                     "n_gcd": int(row.get("n_gcd", 1)) if self.file_type_presence.get("gcd", False) else 1,
                     "v_start": float(row.get("v_start", 2.5)) if self.file_type_presence.get("gcd", False) else 2.5,
