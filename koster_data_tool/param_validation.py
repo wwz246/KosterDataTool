@@ -46,7 +46,7 @@ def validate_battery_row(
 ) -> dict[str, str]:
     errors: dict[str, str] = {}
 
-    if has_cv and cv_current_unit == "A/g":
+    if has_gcd or (has_cv and cv_current_unit == "A/g"):
         try:
             m_pos_f = float(m_pos)
         except Exception:
@@ -94,7 +94,7 @@ def validate_battery_row(
         except Exception:
             errors["v_start"] = "V_start 必须 < V_end"
 
-    if output_type == "Csp" and has_cv and cv_current_unit == "A/g":
+    if output_type == "Csp" and has_gcd:
         try:
             k_f = float(k)
             if k_f <= 0:
