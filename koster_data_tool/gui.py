@@ -109,15 +109,15 @@ class App:
     def _build_step1(self) -> None:
         actions = ttk.Frame(self.page1)
         actions.pack(fill="x")
-        ttk.Button(actions, text="选择根目录", command=self.choose_root).pack(side="left")
-        ttk.Button(actions, text="科斯特重命名", command=self.run_koster_rename).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="科斯特数据处理", command=self.choose_root).pack(side="left")
         self.start_scan_btn = ttk.Button(actions, text="开始扫描", command=self.start_scan, state="disabled")
         self.start_scan_btn.pack(side="left", padx=8)
         self.cancel_scan_btn = ttk.Button(actions, text="取消扫描", command=self.cancel_scan, state="disabled")
         self.cancel_scan_btn.pack(side="left")
         ttk.Button(actions, text="打开跳过清单", command=self.open_skipped_list_dir).pack(side="left", padx=8)
+        ttk.Button(actions, text="科斯特重命名", command=self.run_koster_rename).pack(side="right", padx=(24, 0))
 
-        path_frame = ttk.LabelFrame(self.page1, text="已选根目录", padding=8)
+        path_frame = ttk.LabelFrame(self.page1, text="科斯特已选根目录", padding=8)
         path_frame.pack(fill="x", pady=(10, 0))
         ttk.Label(path_frame, textvariable=self.root_path_var).pack(anchor="w")
 
