@@ -221,8 +221,6 @@ def _enforce_required_columns(file_type: str, col_index: dict[str, int], file_pa
             missing.append("Time")
         if "E" not in col_index:
             missing.append("Voltage")
-        if "Cycle" not in col_index:
-            missing.append("Cycle")
         if missing:
             _raise_with_report("E9007", f"E9007: missing required columns for GCD missing={','.join(missing)} file={file_path}", file_path, logger, run_report_path)
     elif ftype == "EIS":

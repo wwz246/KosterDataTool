@@ -39,7 +39,7 @@ _GCD_UNIT_RE = re.compile(
 )
 
 
-def run_rename(root_dir: Path, logger: Logger | None = None) -> tuple[str, bool]:
+def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callable[[int, int, str], None] | None = None) -> tuple[str, bool]:
     root_dir = root_dir.expanduser().resolve()
     issues: list[RenameIssue] = []
     renamed_lines: list[str] = []
@@ -51,6 +51,14 @@ def run_rename(root_dir: Path, logger: Logger | None = None) -> tuple[str, bool]
             logger(message)
 
     txt_files = [p for p in root_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".txt"]
+    total_targets = 0
+    processed = 0
+
+    def report_progress(current: Path) -> None:
+        nonlocal processed
+        processed += 1
+        if progress_cb is not None:
+            progress_cb(processed, total_targets, str(current))
     file_type_map: dict[Path, str] = {}
     for path in txt_files:
         lower_name = path.name.lower()
@@ -60,6 +68,8 @@ def run_rename(root_dir: Path, logger: Logger | None = None) -> tuple[str, bool]
             file_type_map[path] = "CV"
         elif "gcd" in lower_name:
             file_type_map[path] = "GCD"
+
+    total_targets = len(file_type_map)
 
     eis_by_dir: dict[Path, list[Path]] = defaultdict(list)
     cv_by_dir: dict[Path, list[Path]] = defaultdict(list)
@@ -77,17 +87,19 @@ def run_rename(root_dir: Path, logger: Logger | None = None) -> tuple[str, bool]
         log_issue("INFO", "当前系统非 Windows，EIS 排序从创建时间回退为修改时间（mtime）。")
 
     for folder, files in eis_by_dir.items():
-        _rename_eis_in_folder(folder, files, renamed_lines, log_issue, fallback_to_mtime)
+        _rename_eis_in_folder(folder, files, renamed_lines, log_issue, fallback_to_mtime, report_progress)
 
     for folder, files in cv_by_dir.items():
         hint = _build_side_hint(files, "cv")
         for file_path in files:
             _rename_cv_or_gcd(file_path, "CV", hint, renamed_lines, log_issue)
+            report_progress(file_path)
 
     for folder, files in gcd_by_dir.items():
         hint = _build_side_hint(files, "gcd")
         for file_path in files:
             _rename_cv_or_gcd(file_path, "GCD", hint, renamed_lines, log_issue)
+            report_progress(file_path)
 
     summary_lines: list[str] = [f"根目录: {root_dir}"]
     if renamed_lines:
@@ -109,8 +121,11 @@ def _rename_eis_in_folder(
     renamed_lines: list[str],
     log_issue: Callable[[str, str], None],
     fallback_to_mtime: bool,
+    progress_cb: Callable[[Path], None],
 ) -> None:
     if all(_PATTERN_EIS_DONE.match(f.name) for f in files):
+        for f in files:
+            progress_cb(f)
         return
 
     def sort_key(p: Path):
@@ -128,6 +143,8 @@ def _rename_eis_in_folder(
     for src, dst in targets.items():
         if dst.exists() and dst.resolve() not in source_set:
             log_issue("冲突", f"EIS 整文件夹跳过：{folder}，目标已存在且不在重命名集合内 -> {dst}")
+            for f in files:
+                progress_cb(f)
             return
 
     tmp_map: dict[Path, Path] = {}
@@ -144,6 +161,10 @@ def _rename_eis_in_folder(
                         tmp.rename(old)
                     except Exception as rollback_exc:
                         log_issue("异常", f"EIS 回滚失败：{tmp} -> {old}，原因：{rollback_exc}")
+            for pending in sorted_files[len(tmp_map):]:
+                progress_cb(pending)
+            for done in tmp_map:
+                progress_cb(done)
             return
 
     for src, tmp_path in tmp_map.items():
@@ -151,6 +172,7 @@ def _rename_eis_in_folder(
         if final_path.exists():
             log_issue("冲突", f"EIS 第二阶段冲突，跳过：{tmp_path} -> {final_path}（目标已存在）")
             _restore_tmp(tmp_path, src, log_issue)
+            progress_cb(src)
             continue
         try:
             tmp_path.rename(final_path)
@@ -158,6 +180,8 @@ def _rename_eis_in_folder(
         except Exception as exc:
             log_issue("异常", f"EIS 第二阶段失败：{tmp_path} -> {final_path}，原因：{exc}")
             _restore_tmp(tmp_path, src, log_issue)
+        finally:
+            progress_cb(src)
 
 
 def _restore_tmp(tmp_path: Path, old_path: Path, log_issue: Callable[[str, str], None]) -> None:
