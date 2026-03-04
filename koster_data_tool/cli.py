@@ -728,6 +728,11 @@ def _selftest(ctx, logger) -> int:
         cancel_flag=threading.Event(),
         progress_cb=None,
     )
+    for battery in result.batteries:
+        expected_cv_max = max((_estimate_cycle_from_file(Path(f.path), "CV", logger, str(ctx.report_path)) for f in battery.cv_files), default=None)
+        expected_gcd_max = max((_estimate_cycle_from_file(Path(f.path), "GCD", logger, str(ctx.report_path)) for f in battery.gcd_files), default=None)
+        assert battery.cv_max_cycle == expected_cv_max, f"scan_root CV max_cycle must come from split_cycles for {battery.name}"
+        assert battery.gcd_max_cycle == expected_gcd_max, f"scan_root GCD max_cycle must come from split_cycles for {battery.name}"
     skipped_report = Path(result.skipped_report_path)
     assert skipped_report.exists(), "skipped report must exist"
     assert skipped_report.read_text(encoding="utf-8").strip(), "skipped report must be non-empty"

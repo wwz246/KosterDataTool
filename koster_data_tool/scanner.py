@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .fixed_tab_reader import read_fixed_tab_table, tokens_to_float_matrix
-from .text_parse import extract_k_cycle_markers
+from .colmap import parse_file_for_cycles
+from .cycle_split import split_cycles
 
 
 FILE_RE = re.compile(r"^(CV|GCD|EIS)-([+-]?(?:\d+(?:\.\d*)?|\.\d+))\.txt$", re.IGNORECASE)
@@ -47,52 +47,18 @@ class ScanResult:
     ignored_invalid_dirs: list[str]
 
 
-def _max_cycle_from_parse_core(file_type: str, content: str, file_path: Path) -> Optional[int]:
-    marker_events = extract_k_cycle_markers(content)
-    try:
-        header, rows_tokens = read_fixed_tab_table(str(file_path))
-        matrix = tokens_to_float_matrix(header, rows_tokens, file_path=str(file_path))
-    except Exception:
-        return None
+class _ScannerNoopLogger:
+    def info(self, *_args, **_kwargs) -> None:
+        return
 
-    if not matrix:
-        return None
+    def warning(self, *_args, **_kwargs) -> None:
+        return
 
-    if file_type == "GCD":
-        try:
-            cycle_idx = next(i for i, h in enumerate(header) if "cycle" in h.lower())
-        except StopIteration:
-            return None
-        cycle_values: list[int] = []
-        for row in matrix:
-            v = row[cycle_idx]
-            if abs(v - round(v)) > 1e-6:
-                return None
-            cycle_values.append(int(round(v)))
-        return max(cycle_values) if cycle_values else None
+    def error(self, *_args, **_kwargs) -> None:
+        return
 
-    kept_raw_line_indices = [j + 3 for j in range(len(matrix))]
-    if not marker_events:
-        return 1
-
-    def _pos(raw_line_index: int) -> int | None:
-        pos = None
-        for idx, ridx in enumerate(kept_raw_line_indices):
-            if ridx <= raw_line_index:
-                pos = idx
-            else:
-                break
-        return pos
-
-    valid_markers = [e for e in marker_events if int(e.get("k", 0)) > 0]
-    if not valid_markers:
-        return 1
-
-    n_max = max(int(e["k"]) for e in valid_markers)
-    latest_n_marker = max((e for e in valid_markers if int(e["k"]) == n_max), key=lambda e: int(e["rawLineIndex"]))
-    last_pos = _pos(int(latest_n_marker["rawLineIndex"]))
-    has_data_after_last_marker = (last_pos is None) or (last_pos < (len(matrix) - 1))
-    return n_max + 1 if has_data_after_last_marker else n_max
+    def exception(self, *_args, **_kwargs) -> None:
+        return
 
 
 def _detect_file(file_name: str, abs_path: Path) -> Optional[RecognizedFile]:
@@ -104,15 +70,6 @@ def _detect_file(file_name: str, abs_path: Path) -> Optional[RecognizedFile]:
 
 def _sort_recognized(files: list[RecognizedFile]) -> list[RecognizedFile]:
     return sorted(files, key=lambda x: (x.num, Path(x.path).name.lower()))
-
-
-def _safe_read_text(path: Path) -> Optional[str]:
-    for enc in ("utf-8", "gbk", "latin-1"):
-        try:
-            return path.read_text(encoding=enc)
-        except Exception:
-            continue
-    return None
 
 
 def _collect_skipped_deep_paths(root_path: Path) -> tuple[int, int, list[str]]:
@@ -155,16 +112,26 @@ def _collect_cycles_from_recognized(
     recognized_files: list[RecognizedFile],
     cancel_flag: threading.Event | None,
 ) -> list[int]:
+    logger = _ScannerNoopLogger()
     cycles: list[int] = []
     for file_obj in recognized_files:
         if cancel_flag and cancel_flag.is_set():
             break
-        txt = _safe_read_text(Path(file_obj.path))
-        if txt is None:
+        try:
+            _mapping, _series, kept_raw_line_indices, marker_events, has_cycle_col, cycle_values = parse_file_for_cycles(
+                file_path=file_obj.path,
+                file_type=file_type,
+                a_geom_cm2=1.0,
+                v_start=None,
+                v_end=None,
+                logger=logger,
+                run_report_path=os.devnull,
+            )
+        except Exception:
             continue
-        mc = _max_cycle_from_parse_core(file_type, txt, Path(file_obj.path))
-        if mc is not None:
-            cycles.append(mc)
+        split_result = split_cycles(file_type, has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
+        if split_result.max_cycle is not None:
+            cycles.append(split_result.max_cycle)
     return cycles
 
 
