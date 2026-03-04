@@ -31,6 +31,7 @@ class App:
         self.cancel_event = threading.Event()
         self.scan_thread: threading.Thread | None = None
         self.export_thread: threading.Thread | None = None
+        self.rename_thread: threading.Thread | None = None
         self.msg_q: queue.Queue = queue.Queue()
         self.last_scan_root: str | None = None
         self.default_row_values = {"m_pos": 10, "m_neg": 0, "p_active": 90, "k": 1, "n_cv": 1, "n_gcd": 1, "v_start": 2.5, "v_end": 4.2}
@@ -61,6 +62,10 @@ class App:
         self.filter_tab_visible = True
         self._final_stage_seen = False
         self._pending_export_result: dict | None = None
+        self.rename_progress_win: tk.Toplevel | None = None
+        self.rename_progress_var = tk.DoubleVar(value=0.0)
+        self.rename_progress_text_var = tk.StringVar(value="0/0")
+        self.rename_current_var = tk.StringVar(value="-")
 
         self._build_ui()
         self._load_default_open_dir()
@@ -328,14 +333,41 @@ class App:
         selected_dir = Path(chosen).resolve()
         write_last_root(self.ctx.paths.state_dir, selected_dir)
         self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.state_dir, self.ctx.paths.state_dir)
-        summary_text, has_conflicts = run_rename(
-            selected_dir,
-            logger=lambda m: self.logger.info("koster_rename", message=m),
-        )
-        if has_conflicts:
-            self._show_rename_log(summary_text)
-            return
-        messagebox.showinfo("科斯特重命名", summary_text)
+        self._open_rename_progress_win()
+
+        def worker() -> None:
+            try:
+                summary_text, has_conflicts = run_rename(
+                    selected_dir,
+                    logger=lambda m: self.logger.info("koster_rename", message=m),
+                    progress_cb=lambda done, total, current: self.msg_q.put(("rename_progress", (done, total, current))),
+                )
+                self.msg_q.put(("rename_done", (summary_text, has_conflicts)))
+            except Exception as exc:  # noqa: BLE001
+                self.msg_q.put(("rename_done", (f"重命名异常: {exc}", True)))
+
+        self.rename_thread = threading.Thread(target=worker, daemon=True)
+        self.rename_thread.start()
+
+
+    def _open_rename_progress_win(self) -> None:
+        if self.rename_progress_win is not None and self.rename_progress_win.winfo_exists():
+            self.rename_progress_win.destroy()
+        win = tk.Toplevel(self.root)
+        win.title("科斯特重命名进度")
+        win.geometry("640x140")
+        win.transient(self.root)
+        self.rename_progress_win = win
+        self.rename_progress_var.set(0.0)
+        self.rename_progress_text_var.set("0/0")
+        self.rename_current_var.set("-")
+
+        frame = ttk.Frame(win, padding=10)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="当前文件:").pack(anchor="w")
+        ttk.Label(frame, textvariable=self.rename_current_var).pack(anchor="w", pady=(0, 6))
+        ttk.Progressbar(frame, orient="horizontal", mode="determinate", maximum=100, variable=self.rename_progress_var).pack(fill="x")
+        ttk.Label(frame, textvariable=self.rename_progress_text_var).pack(anchor="e", pady=(6, 0))
 
     def _show_rename_log(self, content: str) -> None:
         win = tk.Toplevel(self.root)
@@ -434,6 +466,21 @@ class App:
                         self._on_export_done(payload)
                     else:
                         self._pending_export_result = payload
+                elif kind == "rename_progress":
+                    done, total, current = payload
+                    pct = 100.0 if total == 0 else min(100.0, done * 100.0 / total)
+                    self.rename_progress_var.set(pct)
+                    self.rename_progress_text_var.set(f"{done}/{total}")
+                    self.rename_current_var.set(current)
+                elif kind == "rename_done":
+                    summary_text, has_conflicts = payload
+                    if self.rename_progress_win is not None and self.rename_progress_win.winfo_exists():
+                        self.rename_progress_win.destroy()
+                    self.rename_progress_win = None
+                    if has_conflicts:
+                        self._show_rename_log(summary_text)
+                    else:
+                        messagebox.showinfo("科斯特重命名", summary_text)
         except queue.Empty:
             pass
         self.root.after(120, self._poll_queue)
