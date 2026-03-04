@@ -124,6 +124,63 @@ def _build_current_candidates(t: list[float], I: list[float], epsI: float) -> li
     return [(a, b) for a, b, _ in merged]
 
 
+def _current_signs_with_rest(I: list[float], eps: float) -> list[int]:
+    return [_sign(v, eps) for v in I]
+
+
+def _find_turn_candidates(tags: list[int]) -> list[int]:
+    candidates: list[int] = []
+    n = len(tags)
+    i = 1
+    while i < n:
+        if tags[i] == tags[i - 1]:
+            i += 1
+            continue
+        left = tags[i - 1]
+        right = tags[i]
+        if left == 0:
+            j = i - 1
+            while j >= 0 and tags[j] == 0:
+                j -= 1
+            left = tags[j] if j >= 0 else 0
+        if right == 0:
+            j = i
+            while j < n and tags[j] == 0:
+                j += 1
+            right = tags[j] if j < n else 0
+        if left != 0 and right != 0 and left != right:
+            candidates.append(i)
+        i += 1
+    return candidates
+
+
+def _build_primary_turn_candidates(t: list[float], E: list[float], I: list[float], epsI: float, V_start: float, V_end: float) -> list[tuple[int, int]] | None:
+    if len(I) < 4:
+        return None
+    i_abs = [abs(v) for v in I]
+    i_med = median(i_abs) if i_abs else 0.0
+    i_eps = max(epsI, 0.05 * i_med, 1e-9)
+    tags = _current_signs_with_rest(I, i_eps)
+    turn_idxs = _find_turn_candidates(tags)
+    if not turn_idxs:
+        return None
+
+    first_sign = next((sg for sg in tags if sg != 0), 0)
+    if first_sign == 0:
+        return None
+
+    v_span = max(0.0, V_end - V_start)
+    v_eps = max(0.03 * v_span, 0.05)
+    target_v = V_end if first_sign > 0 else V_start
+    valid = [idx for idx in turn_idxs if abs(E[idx] - target_v) <= v_eps]
+    if not valid:
+        return None
+    turn = min(valid, key=lambda idx: abs(E[idx] - target_v))
+    if turn <= 0 or turn >= len(I):
+        return None
+    return [(0, turn - 1), (turn, len(I) - 1)]
+
+
 def _make_segment(a: int, b: int, t: list[float], E: list[float], I: list[float], epsI: float, epsV: float) -> tuple[GcdSegment | None, bool]:
     I_seg = I[a : b + 1]
     E_seg = E[a : b + 1]
@@ -192,7 +249,11 @@ def segment_one_cycle(t: list[float], E: list[float], I: list[float], Step: list
     if S2 is not None:
         candidates = _build_step_candidates(S2)
     else:
-        candidates = _build_current_candidates(t2, I2, epsI)
+        primary = _build_primary_turn_candidates(t2, E2, I2, epsI, V_start, V_end)
+        if primary is not None:
+            candidates = primary
+        else:
+            candidates = _build_current_candidates(t2, I2, epsI)
 
     dropped = 0
     cycle_warnings: list[str] = []

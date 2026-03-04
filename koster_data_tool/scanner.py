@@ -59,17 +59,16 @@ def _max_cycle_from_parse_core(file_type: str, content: str, file_path: Path) ->
         return None
 
     if file_type == "GCD":
-        try:
-            cycle_idx = next(i for i, h in enumerate(header) if "cycle" in h.lower())
-        except StopIteration:
-            return None
-        cycle_values: list[int] = []
-        for row in matrix:
-            v = row[cycle_idx]
-            if abs(v - round(v)) > 1e-6:
-                return None
-            cycle_values.append(int(round(v)))
-        return max(cycle_values) if cycle_values else None
+        cycle_idx = next((i for i, h in enumerate(header) if "cycle" in h.lower()), None)
+        if cycle_idx is not None:
+            cycle_values: list[int] = []
+            for row in matrix:
+                v = row[cycle_idx]
+                if abs(v - round(v)) > 1e-6:
+                    return None
+                cycle_values.append(int(round(v)))
+            if cycle_values:
+                return max(cycle_values)
 
     kept_raw_line_indices = [j + 3 for j in range(len(matrix))]
     if not marker_events:

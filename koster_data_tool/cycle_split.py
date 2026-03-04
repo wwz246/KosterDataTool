@@ -26,16 +26,15 @@ def split_cycles(
         return CycleSplitResult(file_type=ftype, method="none", max_cycle=None, cycles={}, warnings=warnings)
 
     if ftype == "GCD":
-        if not has_cycle_col or not cycle_values:
-            raise ValueError("E9007: missing Cycle column for GCD")
-        max_cycle = max(cycle_values)
-        cycles: dict[int, list[int]] = {}
-        for i, cyc in enumerate(cycle_values):
-            k = int(cyc)
-            if k <= 0:
-                continue
-            cycles.setdefault(k, []).append(i)
-        return CycleSplitResult(file_type=ftype, method="cycle_col", max_cycle=max_cycle, cycles=cycles, warnings=warnings)
+        if has_cycle_col and cycle_values:
+            max_cycle = max(cycle_values)
+            cycles: dict[int, list[int]] = {}
+            for i, cyc in enumerate(cycle_values):
+                k = int(cyc)
+                if k <= 0:
+                    continue
+                cycles.setdefault(k, []).append(i)
+            return CycleSplitResult(file_type=ftype, method="cycle_col", max_cycle=max_cycle, cycles=cycles, warnings=warnings)
 
     n_rows = len(kept_raw_line_indices)
     if n_rows == 0:
@@ -79,6 +78,8 @@ def split_cycles(
         prev_end = cur
 
     if not latest_marker_by_k:
+        if ftype == "GCD":
+            warnings.append("GCD 缺少 Cycle 列且未发现 k CYCLE marker，已按 1 圈处理")
         return CycleSplitResult(file_type=ftype, method="k_cycle", max_cycle=1, cycles={1: list(range(n_rows))}, warnings=warnings)
 
     n_max = max(latest_marker_by_k)

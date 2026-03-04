@@ -16,7 +16,7 @@ from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_re
 from .gcd_window_metrics import compute_gcd_file_metrics
 from .gui import run_gui
 from .rate_retention import build_rate_and_retention_for_battery
-from .scanner import scan_root
+from .scanner import _max_cycle_from_parse_core, scan_root
 from .state_store import write_last_root
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="KosterDataTool")
@@ -84,6 +84,24 @@ def _write_sample_gcd_no_cycle(path: Path) -> None:
         "2\t3.3\t0.5\n",
         encoding="utf-8",
     )
+def _write_sample_gcd_k_cycle(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Time\tVoltage\tCurrent\n"
+        "0\t2.5\t0.5\n"
+        "1\t3.2\t0.5\n"
+        "2\t4.2\t0.5\n"
+        "3\t3.4\t-0.5\n"
+        "4\t2.6\t-0.5\n"
+        "5\t2.5\t-0.5 1 CYCLE\n"
+        "6\t2.5\t0.5\n"
+        "7\t3.2\t0.5\n"
+        "8\t4.2\t0.5\n"
+        "9\t3.4\t-0.5\n"
+        "10\t2.5\t-0.5\n",
+        encoding="utf-8",
+    )
+
 def _write_sample_eis(path: Path) -> None:
     path.write_text("# comment\nFreq\tZ'\tZ''\n1\t2\t3\n2\t3\t4\n", encoding="utf-8")
 def _write_sample_cv_units(path: Path) -> None:
@@ -297,6 +315,7 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_cv(struct_a / "CV-1.txt")
     _write_sample_gcd(struct_a / "GCD-0.5.txt")
     _write_sample_gcd_no_cycle(struct_a / "GCD-2.txt")
+    _write_sample_gcd_k_cycle(struct_a / "GCD-0.6.txt")
     _write_sample_eis(struct_a / "EIS-1.txt")
     _write_sample_cv_units(struct_a / "CV-2.txt")
     _write_sample_gcd_units(struct_a / "GCD-3.txt")
@@ -443,12 +462,20 @@ def _selftest(ctx, logger) -> int:
     print(f"SELFTEST_ROOT={struct_b}")
     assert _estimate_cycle_from_file(struct_a / "CV-1.txt", "CV", logger, str(ctx.report_path)) == 4, "CV-1.txt maxCycle assertion failed"
     assert _estimate_cycle_from_file(struct_a / "GCD-0.5.txt", "GCD", logger, str(ctx.report_path)) == 2, "GCD-1.txt maxCycle assertion failed"
-    gcd2_failed = False
-    try:
-        _estimate_cycle_from_file(struct_a / "GCD-2.txt", "GCD", logger, str(ctx.report_path))
-    except ValueError as e:
-        gcd2_failed = "E9007" in str(e)
-    assert gcd2_failed, "GCD-2.txt must fail with E9007"
+    _m_gcd2, _s_gcd2, gcd2_kept, gcd2_markers, gcd2_has_cycle_col, gcd2_cycle_values = parse_file_for_cycles(
+        file_path=str(struct_a / "GCD-2.txt"),
+        file_type="GCD",
+        a_geom_cm2=1.0,
+        v_start=2.5,
+        v_end=4.2,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    gcd2_split = split_cycles("GCD", gcd2_has_cycle_col, gcd2_cycle_values, gcd2_kept, gcd2_markers)
+    assert gcd2_split.method == "k_cycle", "GCD-2.txt should fallback to k_cycle"
+    assert gcd2_split.max_cycle == 1, "GCD-2.txt should fallback to single cycle"
+    gcd2_mc_scan = _max_cycle_from_parse_core("GCD", (struct_a / "GCD-2.txt").read_text(encoding="utf-8"), struct_a / "GCD-2.txt")
+    assert gcd2_mc_scan == 1, "scanner GCD-2.txt should fallback to single cycle"
     cv_map, cv_series = read_and_map_file(
         file_path=str(struct_a / "CV-2.txt"),
         file_type="CV",
@@ -535,6 +562,21 @@ def _selftest(ctx, logger) -> int:
     for k, idxs in gcd10_split.cycles.items():
         for i in idxs:
             assert gcd10_cycle_values is not None and gcd10_cycle_values[i] == k, "GCD-10.txt cycle membership assertion failed"
+
+    _m_gcd06, _s_gcd06, gcd06_kept, gcd06_markers, gcd06_has_cycle_col, gcd06_cycle_values = parse_file_for_cycles(
+        file_path=str(struct_a / "GCD-0.6.txt"),
+        file_type="GCD",
+        a_geom_cm2=1.0,
+        v_start=2.5,
+        v_end=4.2,
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    gcd06_split = split_cycles("GCD", gcd06_has_cycle_col, gcd06_cycle_values, gcd06_kept, gcd06_markers)
+    assert gcd06_split.method == "k_cycle", "GCD-0.6.txt should use k_cycle"
+    assert gcd06_split.max_cycle == 2, "GCD-0.6.txt should split into 2 cycles"
+    gcd06_mc_scan = _max_cycle_from_parse_core("GCD", (struct_a / "GCD-0.6.txt").read_text(encoding="utf-8"), struct_a / "GCD-0.6.txt")
+    assert gcd06_mc_scan == 2, "scanner GCD-0.6.txt should use k_cycle"
     _m_eis10, _s_eis10, eis10_kept, eis10_markers, eis10_has_cycle_col, eis10_cycle_values = parse_file_for_cycles(
         file_path=str(struct_a / "EIS-10.txt"),
         file_type="EIS",
@@ -604,6 +646,36 @@ def _selftest(ctx, logger) -> int:
     ]
     run = subprocess.run(cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
     assert run.returncode == 0, f"gcd-seg-one cli assertion failed: {run.stderr}"
+
+    cmd_k_cycle = [
+        "python",
+        "main.py",
+        "--no-gui",
+        "--gcd-seg-one",
+        str(struct_a / "GCD-0.6.txt"),
+        "--m-pos",
+        "10",
+        "--m-neg",
+        "0",
+        "--p-active",
+        "90",
+        "--v-start",
+        "2.5",
+        "--v-end",
+        "4.2",
+        "--n-cycle",
+        "2",
+    ]
+    run_k_cycle = subprocess.run(cmd_k_cycle, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    assert run_k_cycle.returncode == 0, f"gcd-seg-one k_cycle assertion failed: {run_k_cycle.stderr}"
+    metrics_06 = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-0.6.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    assert metrics_06.fatal_error is None, "GCD-0.6 with k_cycle should be computable"
     metrics = compute_gcd_file_metrics(
         file_path=str(struct_a / "GCD-1.txt"),
         root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
