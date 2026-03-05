@@ -16,6 +16,7 @@ from .gcd_segment import calc_m_active_g, decide_main_order, drop_first_cycle_re
 from .gcd_window_metrics import compute_gcd_file_metrics
 from .gui import run_gui
 from .rate_retention import build_rate_and_retention_for_battery
+from .renamer import _extract_number, run_rename
 from .scanner import scan_root
 from .state_store import write_last_root
 def build_parser() -> argparse.ArgumentParser:
@@ -758,6 +759,36 @@ def _selftest(ctx, logger) -> int:
     eis_block = export_eis_block(str(step8_root / "EIS-1.txt"), 2.0, logger, str(ctx.report_path))
     assert eis_block.data[1][0] < 0, "EIS 导出第二列需为 -Z''"
     assert abs(eis_block.data[0][0] - 5.0) < 1e-12, "EIS Ohm·cm2 需按面积换算"
+
+    # renamer selftest
+    renamer_root = temp_root / "renamer_case"
+    renamer_root.mkdir(parents=True, exist_ok=True)
+    for name in [
+        "GCD-3V-0.5Ag.txt",
+        "GCD-3V-0.5AG.txt",
+        "GCD-3V-0.5A G.txt",
+        "GCD-3V-0.5A-g.txt",
+        "CV-10mVps.txt",
+    ]:
+        (renamer_root / name).write_text("", encoding="utf-8")
+    direct_slash_extract = _extract_number("GCD-3V-0.5A/g", "GCD", None)
+    assert direct_slash_extract.number == "0.5", "A/g 形式应可提取 0.5"
+    rename_summary, rename_has_conflict = run_rename(renamer_root)
+    assert isinstance(rename_summary, str) and rename_summary, "run_rename summary should be non-empty"
+    assert rename_has_conflict is True, "renamer case should include conflict due to duplicated target names"
+    assert (renamer_root / "GCD-0.5.txt").exists(), "至少应有一个 GCD 文件成功改名到 0.5"
+    assert (renamer_root / "CV-10.txt").exists(), "CV 单位提取应保持正常"
+    logs_dir = renamer_root / "_rename_logs"
+    csv_logs = sorted(logs_dir.glob("rename_*.csv"))
+    jsonl_logs = sorted(logs_dir.glob("rename_*.jsonl"))
+    assert csv_logs and jsonl_logs, "renamer 应生成 csv/jsonl 日志"
+    latest_jsonl = jsonl_logs[-1]
+    rows = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+    gcd_rows = [r for r in rows if r.get("kind") == "GCD" and r.get("extracted_number") == "0.5"]
+    assert len(gcd_rows) >= 4, "所有 GCD 变体都应提取到 0.5"
+    assert any(r.get("reason_code") == "TARGET_EXISTS" and r.get("status") == "CONFLICT" for r in rows), "冲突日志需含 TARGET_EXISTS"
+    assert any(r.get("extract_method") in {"unit_regex", "done_match", "fallback_numbers"} for r in rows), "日志需包含 extract_method 字段"
+    assert all("reason_code" in r and "extract_method" in r for r in rows), "jsonl 日志应包含 reason_code/extract_method 字段"
     rate_ok = build_rate_and_retention_for_battery(
         gcd_files=[str(step8_root / "battery_rate_ok" / "GCD-0.5.txt"), str(step8_root / "battery_rate_ok" / "GCD-1.txt")],
         n_gcd=1,
