@@ -22,24 +22,3 @@ def extract_k_cycle_markers(raw_text: str) -> list[dict]:
 
     return marker_events
 
-
-def estimate_max_cycle(
-    file_type: str,
-    has_cycle_col: bool,
-    cycle_values: list[int] | None,
-    marker_events: list[dict],
-    has_data_after_last_marker: bool,
-) -> int:
-    if file_type not in {"CV", "GCD"}:
-        raise ValueError("file_type must be CV or GCD")
-
-    if file_type == "GCD":
-        if not has_cycle_col or not cycle_values:
-            raise ValueError("E9007: missing Cycle column for GCD")
-        return max(cycle_values)
-
-    if not marker_events:
-        return 1
-
-    n_max = max(int(event["k"]) for event in marker_events)
-    return n_max + 1 if has_data_after_last_marker else n_max
