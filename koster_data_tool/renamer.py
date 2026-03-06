@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import traceback
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -48,6 +49,16 @@ class RenameEvent:
     candidate_numbers: str = ""
     hint_side: str = ""
     chosen_score: str = ""
+    root_dir: str = ""
+    src_parent: str = ""
+    src_exists: str = ""
+    dst_exists: str = ""
+    src_size_bytes: str = ""
+    dst_size_bytes: str = ""
+    src_mtime: str = ""
+    dst_mtime: str = ""
+    suggestion: str = ""
+    exception_stack: str = ""
 
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
@@ -84,8 +95,18 @@ _REASON_SUGGESTIONS = {
 }
 
 
-def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callable[[int, int, str], None] | None = None) -> tuple[str, bool]:
+def run_rename(
+    root_dir: Path,
+    logger: Logger | None = None,
+    progress_cb: Callable[[int, int, str], None] | None = None,
+    logs_dir: Path | None = None,
+) -> tuple[str, bool]:
     root_dir = root_dir.expanduser().resolve()
+    if logs_dir is None:
+        logs_dir = root_dir / "_rename_logs"
+    else:
+        logs_dir = logs_dir.expanduser().resolve()
+    logs_dir.mkdir(parents=True, exist_ok=True)
     issues: list[RenameIssue] = []
     renamed_lines: list[str] = []
     events: list[RenameEvent] = []
@@ -101,12 +122,30 @@ def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callab
         extract: ExtractNumberResult | None = None,
         exc: Exception | None = None,
     ) -> None:
+        def _stat_str(path: Path | None) -> dict[str, str]:
+            if path is None or not path.exists():
+                return {"exists": "0", "size": "", "mtime": ""}
+            try:
+                stat = path.stat()
+                return {
+                    "exists": "1",
+                    "size": str(stat.st_size),
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                }
+            except Exception:
+                return {"exists": "0", "size": "", "mtime": ""}
+
         winerror = ""
         if exc is not None and hasattr(exc, "winerror") and getattr(exc, "winerror") is not None:
             winerror = str(getattr(exc, "winerror"))
         candidate_numbers = ""
         if extract is not None and extract.candidate_numbers is not None:
             candidate_numbers = json.dumps(extract.candidate_numbers, ensure_ascii=False)
+        src_stat = _stat_str(src)
+        dst_stat = _stat_str(dst)
+        exception_stack = ""
+        if exc is not None:
+            exception_stack = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[:4000]
         events.append(
             RenameEvent(
                 ts=datetime.now().isoformat(timespec="seconds"),
@@ -125,6 +164,16 @@ def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callab
                 candidate_numbers=candidate_numbers,
                 hint_side=(extract.hint_side if (extract and extract.hint_side) else ""),
                 chosen_score=(str(extract.chosen_score) if (extract and extract.chosen_score is not None) else ""),
+                root_dir=str(root_dir),
+                src_parent=str(src.parent),
+                src_exists=src_stat["exists"],
+                dst_exists=dst_stat["exists"],
+                src_size_bytes=src_stat["size"],
+                dst_size_bytes=dst_stat["size"],
+                src_mtime=src_stat["mtime"],
+                dst_mtime=dst_stat["mtime"],
+                suggestion=_REASON_SUGGESTIONS.get(reason_code, _REASON_SUGGESTIONS["UNKNOWN"]),
+                exception_stack=exception_stack,
             )
         )
 
@@ -185,7 +234,7 @@ def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callab
             _rename_cv_or_gcd(file_path, "GCD", hint, renamed_lines, log_issue, record_event)
             report_progress(file_path)
 
-    csv_path, jsonl_path = _write_events(root_dir, events)
+    csv_path, jsonl_path = _write_events(logs_dir, events)
     if logger is not None:
         logger(f"rename logs written: csv={csv_path}, jsonl={jsonl_path}")
 
@@ -220,8 +269,7 @@ def run_rename(root_dir: Path, logger: Logger | None = None, progress_cb: Callab
     return "\n".join(summary_lines), has_conflicts
 
 
-def _write_events(root_dir: Path, events: list[RenameEvent]) -> tuple[Path, Path]:
-    logs_dir = root_dir / "_rename_logs"
+def _write_events(logs_dir: Path, events: list[RenameEvent]) -> tuple[Path, Path]:
     logs_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = logs_dir / f"rename_{stamp}.csv"
