@@ -331,6 +331,11 @@ class App:
         if not chosen:
             return
         selected_dir = Path(chosen).resolve()
+        safe = re.sub(r'[<>:"/\\|?*]', "_", selected_dir.name).rstrip(" .")
+        if not safe:
+            safe = "root"
+        logs_dir = self.ctx.paths.output_dir / "rename_logs" / safe
+        logs_dir.mkdir(parents=True, exist_ok=True)
         write_last_root(self.ctx.paths.state_dir, selected_dir)
         self.default_open_dir = resolve_initial_dir_from_last_root(self.ctx.paths.state_dir, self.ctx.paths.state_dir)
         self._open_rename_progress_win()
@@ -339,8 +344,9 @@ class App:
             try:
                 summary_text, has_conflicts = run_rename(
                     selected_dir,
-                    logger=lambda m: self.logger.info("koster_rename", message=m),
+                    logger=lambda m: self.logger.info(m, source="koster_rename"),
                     progress_cb=lambda done, total, current: self.msg_q.put(("rename_progress", (done, total, current))),
+                    logs_dir=logs_dir,
                 )
                 self.msg_q.put(("rename_done", (summary_text, has_conflicts)))
             except Exception as exc:  # noqa: BLE001
