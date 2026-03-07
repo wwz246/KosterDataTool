@@ -63,11 +63,19 @@ class GcdCycleMetrics:
 class GcdConditionMetrics:
     file_path: str
     j_label: float
-    main_order: str
+    main_order: str | None
     n_gcd: int
     representative_cycle_ok: bool
     cycles: dict[int, GcdCycleMetrics]
     fatal_error: str | None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SegmentCurrentBuildResult:
+    current: list[float]
+    source: str
+    reliable: bool
     warnings: list[str] = field(default_factory=list)
 
 
@@ -462,37 +470,72 @@ def compute_gcd_file_metrics(
     )
     split_result = split_cycles("GCD", has_cycle_col, cycle_values, kept_raw_line_indices, marker_events)
     max_cycle = split_result.max_cycle or 0
-    def _build_seg_current(idxs: list[int]) -> list[float]:
+
+    def _build_seg_current(idxs: list[int]) -> SegmentCurrentBuildResult:
         if "I" in series:
-            return [series["I"][i] for i in idxs]
+            return SegmentCurrentBuildResult(
+                current=[series["I"][i] for i in idxs],
+                source="measured_I",
+                reliable=True,
+                warnings=[],
+            )
         if "Step" in series and idxs:
             step_vals = [int(round(series["Step"][i])) for i in idxs]
             e_vals = [series["E"][i] for i in idxs]
             out = [0.0 for _ in idxs]
-            s = 0
+            seg_count = 0
+            reliable_count = 0
+            s_idx = 0
             for i in range(1, len(idxs) + 1):
                 if i == len(idxs) or step_vals[i] != step_vals[i - 1]:
-                    d = e_vals[i - 1] - e_vals[s]
-                    val = 1.0 if d >= 0 else -1.0
-                    for j in range(s, i):
+                    seg_count += 1
+                    d = e_vals[i - 1] - e_vals[s_idx]
+                    if abs(d) >= 1e-5:
+                        reliable_count += 1
+                        val = 1.0 if d > 0 else -1.0
+                    else:
+                        # Step 段内电压几乎不变时不强行猜测，避免静默误判。
+                        val = 0.0
+                    for j in range(s_idx, i):
                         out[j] = val
-                    s = i
-            return out
-        return [1.0 for _ in idxs]
+                    s_idx = i
+            reliable = seg_count > 0 and reliable_count == seg_count
+            warn = [] if reliable else ["W5301 缺I且Step证据不足，分段电流方向仅部分可推断"]
+            return SegmentCurrentBuildResult(
+                current=out,
+                source="step_inferred" if reliable else "step_inferred_degraded",
+                reliable=reliable,
+                warnings=warn,
+            )
+        return SegmentCurrentBuildResult(
+            current=[0.0 for _ in idxs],
+            source="unavailable",
+            reliable=False,
+            warnings=["W5302 缺I且缺Step，无法可靠推断分段电流方向"],
+        )
 
     all_cycle_segments = []
     per_cycle_indices: dict[int, list[int]] = {}
+    per_cycle_current_meta: dict[int, SegmentCurrentBuildResult] = {}
     first_cycle_assist_indices = split_result.cycles.get(1, []) if 1 in split_result.cycles else []
+    file_warnings: list[str] = []
+
     for k in range(1, max_cycle + 1):
         idxs = split_result.cycles.get(k, [])
         per_cycle_indices[k] = idxs
         if not idxs:
             continue
         step = [int(round(series["Step"][i])) for i in idxs] if "Step" in series else None
+        seg_current = _build_seg_current(idxs)
+        per_cycle_current_meta[k] = seg_current
+        for msg in seg_current.warnings:
+            line = report_warning(run_report_path, msg.split()[0], " ".join(msg.split()[1:]), file_path=file_path, cycle=k)
+            file_warnings.append(line)
+            logger.warning(line, code=msg.split()[0], file_path=file_path, cycle=k, current_source=seg_current.source)
         seg = segment_one_cycle(
             [series["t"][i] for i in idxs],
             [series["E"][i] for i in idxs],
-            _build_seg_current(idxs),
+            seg_current.current,
             step,
             v_start,
             v_end,
@@ -502,20 +545,73 @@ def compute_gcd_file_metrics(
         seg.cycle_k = k
         all_cycle_segments.append(seg)
 
-    if max_cycle >= 2 and all_cycle_segments:
-        order_info = decide_main_order(all_cycle_segments)
-        main_order = order_info.order
-    else:
+    order_info = decide_main_order(all_cycle_segments) if (max_cycle >= 2 and all_cycle_segments) else None
+    if order_info is not None and order_info.order is not None:
+        main_order: str | None = order_info.order
+        for w in order_info.warnings:
+            line = report_warning(run_report_path, "W5303", w, file_path=file_path)
+            file_warnings.append(line)
+            logger.warning(line, code="W5303", file_path=file_path, decided_from=order_info.decided_from)
+    elif max_cycle < 2:
         main_order = "Charge→Discharge"
+    else:
+        main_order = None
+        line = report_warning(run_report_path, "W5304", "主顺序证据不足，GCD指标降级为不可判定", file_path=file_path)
+        file_warnings.append(line)
+        logger.warning(line, code="W5304", file_path=file_path)
 
     cycles: dict[int, GcdCycleMetrics] = {}
-    file_warnings: list[str] = []
     fatal_error = None
     prefer_source = {"I": "I" in series, "j": "j" in series}
 
     for cyc in all_cycle_segments:
         k = cyc.cycle_k
         segs = cyc
+        seg_meta = per_cycle_current_meta.get(k)
+        if seg_meta is not None and not seg_meta.reliable:
+            line = report_warning(run_report_path, "W5306", "缺I时分段方向不可靠，当前圈降级不可用", file_path=file_path, cycle=k, source=seg_meta.source)
+            file_warnings.append(line)
+            logger.warning(line, code="W5306", file_path=file_path, cycle=k, source=seg_meta.source)
+            cycles[k] = GcdCycleMetrics(
+                k,
+                False,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                v_end - v_start,
+                None,
+                None,
+                None,
+                None,
+                [f"E5301 分段方向不可靠，已降级 file_path={file_path} cycle={k} source={seg_meta.source}"],
+            )
+            continue
+        if main_order is None:
+            line = report_warning(run_report_path, "W5307", "主顺序不可判定，当前圈指标降级不可用", file_path=file_path, cycle=k)
+            file_warnings.append(line)
+            logger.warning(line, code="W5307", file_path=file_path, cycle=k)
+            cycles[k] = GcdCycleMetrics(
+                k,
+                False,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                v_end - v_start,
+                None,
+                None,
+                None,
+                None,
+                [f"E5302 主顺序不可判定，指标降级不可用 file_path={file_path} cycle={k}"],
+            )
+            continue
 
         desired = ["charge", "discharge"] if main_order == "Charge→Discharge" else ["discharge", "charge"]
         chosen = []

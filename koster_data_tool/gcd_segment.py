@@ -28,7 +28,7 @@ class GcdCycleSegments:
 
 @dataclass
 class BatteryMainOrder:
-    order: str
+    order: str | None
     decided_from: str
     warnings: list[str] = field(default_factory=list)
 
@@ -317,18 +317,23 @@ def decide_main_order(cycle_segments: list[GcdCycleSegments]) -> BatteryMainOrde
     if dis > chg:
         return BatteryMainOrder(order="Discharge→Charge", decided_from="vote", warnings=[])
 
-    warnings = ["顺序不稳定"]
+    warnings = ["顺序不稳定，主顺序证据不足"]
     cyc2 = next((c for c in cycle_segments if c.cycle_k == 2), None)
     first2 = None if cyc2 is None else next((s.kind for s in cyc2.segments if s.kind in {"charge", "discharge"}), None)
     if first2 == "discharge":
         order = "Discharge→Charge"
-    else:
+    elif first2 == "charge":
         order = "Charge→Discharge"
+    else:
+        # 不再在证据不足时静默硬默认，明确返回不确定状态。
+        return BatteryMainOrder(order=None, decided_from="insufficient_evidence", warnings=warnings)
     return BatteryMainOrder(order=order, decided_from="cycle2_fallback", warnings=warnings)
 
 
 def drop_first_cycle_reverse_segment(cycle1: GcdCycleSegments, main_order: BatteryMainOrder) -> GcdCycleSegments:
     if cycle1.cycle_k != 1 or not cycle1.segments:
+        return cycle1
+    if main_order.order is None:
         return cycle1
     first_kind = "charge" if main_order.order.startswith("Charge") else "discharge"
     first_seg = cycle1.segments[0]
