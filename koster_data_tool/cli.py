@@ -168,6 +168,25 @@ def _write_sample_gcd_metrics(path: Path) -> None:
         "11\t2.3\t-1\t4\t2\t0.57\t0.61\n",
         encoding="utf-8",
     )
+def _write_sample_gcd_no_i_no_step(path: Path) -> None:
+    path.write_text(
+        "# comment\n"
+        "Time\tVoltage\tCycle\n"
+        "0\t2.4\t1\n"
+        "1\t3.1\t1\n"
+        "2\t4.2\t1\n"
+        "3\t4.1\t1\n"
+        "4\t3.3\t1\n"
+        "5\t2.5\t1\n"
+        "6\t2.5\t2\n"
+        "7\t3.2\t2\n"
+        "8\t4.1\t2\n"
+        "9\t4.0\t2\n"
+        "10\t3.3\t2\n"
+        "11\t2.6\t2\n",
+        encoding="utf-8",
+    )
+
 def _write_sample_gcd_capacity_only(path: Path) -> None:
     path.write_text(
         "# comment\n"
@@ -330,6 +349,7 @@ def _create_selftest_tree(base_root: Path) -> tuple[Path, Path]:
     _write_sample_gcd_window_nonrep_fail(struct_a / "GCD-11.txt")
     _write_sample_gcd_window_boundary_bracket(struct_a / "GCD-12.txt")
     _write_sample_gcd_capacity_only(struct_a / "GCD-4.txt")
+    _write_sample_gcd_no_i_no_step(struct_a / "GCD-13.txt")
     step8_root = base_root / "step8"
     step8_root.mkdir(parents=True, exist_ok=True)
     _write_step8_cv(step8_root / "CV-5.txt")
@@ -456,6 +476,28 @@ def _run_gcd_seg_one(ctx, logger, args) -> int:
     print(f"warnings={cycle_seg.warnings}")
     print(f"run_report_path={ctx.report_path}")
     return 0
+SELFTEST_SUBPROCESS_TIMEOUT_S = 120
+
+
+def _run_selftest_subprocess(ctx, cmd: list[str], *, case_label: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(ctx.paths.program_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=SELFTEST_SUBPROCESS_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout_tail = (exc.stdout or "")[-400:] if isinstance(exc.stdout, str) else ""
+        stderr_tail = (exc.stderr or "")[-400:] if isinstance(exc.stderr, str) else ""
+        raise AssertionError(
+            f"selftest subprocess timeout: case={case_label} timeout={SELFTEST_SUBPROCESS_TIMEOUT_S}s "
+            f"cmd={' '.join(cmd)} stdout_tail={stdout_tail!r} stderr_tail={stderr_tail!r}"
+        ) from exc
+
+
 def _selftest(ctx, logger) -> int:
     temp_root = ctx.run_temp_dir / "selftest_root"
     struct_a, struct_b = _create_selftest_tree(temp_root)
@@ -641,7 +683,7 @@ def _selftest(ctx, logger) -> int:
         "--n-cycle",
         "1",
     ]
-    run = subprocess.run(cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    run = _run_selftest_subprocess(ctx, cmd, case_label="gcd-seg-one")
     assert run.returncode == 0, f"gcd-seg-one cli assertion failed: {run.stderr}"
 
     cmd_k_cycle = [
@@ -663,7 +705,7 @@ def _selftest(ctx, logger) -> int:
         "--n-cycle",
         "2",
     ]
-    run_k_cycle = subprocess.run(cmd_k_cycle, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    run_k_cycle = _run_selftest_subprocess(ctx, cmd_k_cycle, case_label="gcd-seg-one-k-cycle")
     assert run_k_cycle.returncode == 0, f"gcd-seg-one k_cycle assertion failed: {run_k_cycle.stderr}"
     metrics_06 = compute_gcd_file_metrics(
         file_path=str(struct_a / "GCD-0.6.txt"),
@@ -691,6 +733,17 @@ def _selftest(ctx, logger) -> int:
     rep_capacity = metrics_capacity.cycles.get(metrics_capacity.n_gcd)
     assert rep_capacity is not None, "W5101 样例应产出代表圈结果"
     assert rep_capacity.delta_q_source == "capacity", "W5101 样例应为 capacity 源"
+    metrics_no_i_no_step = compute_gcd_file_metrics(
+        file_path=str(struct_a / "GCD-13.txt"),
+        root_params={"v_start": 2.5, "v_end": 4.2, "a_geom": 1.0, "output_type": "Csp", "k_factor": 1.0, "n_gcd": 1},
+        battery_params={"m_pos": 10.0, "m_neg": 0.0, "p_active": 90.0},
+        logger=logger,
+        run_report_path=str(ctx.report_path),
+    )
+    rep_no_i = metrics_no_i_no_step.cycles.get(metrics_no_i_no_step.n_gcd)
+    assert rep_no_i is not None, "缺I缺Step样例应保留圈记录"
+    assert rep_no_i.ok_window is False and rep_no_i.delta_q_chg is None and rep_no_i.delta_q_dis is None, "缺I缺Step样例应降级为不可用"
+    assert any("W5302" in w for w in metrics_no_i_no_step.warnings), "缺I缺Step样例应输出 W5302"
     ce_raw = 100 * (metrics.cycles[metrics.n_gcd].delta_q_dis / metrics.cycles[metrics.n_gcd].delta_q_chg)
     ce_rounded_proxy = 100 * (round(metrics.cycles[metrics.n_gcd].delta_q_dis, 2) / round(metrics.cycles[metrics.n_gcd].delta_q_chg, 2))
     assert abs(ce_raw - ce_rounded_proxy) > 1e-6, "CE 必须用未取整 ΔQ"
@@ -813,7 +866,7 @@ def _selftest(ctx, logger) -> int:
     # step9: 全链路导出回归
     before = {p.name for p in struct_b.iterdir() if p.is_file()}
     export_cmd = ["python", "main.py", "--no-gui", "--root", str(struct_b), "--export", "--output-type", "Csp"]
-    run_export = subprocess.run(export_cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    run_export = _run_selftest_subprocess(ctx, export_cmd, case_label="export-csp")
     assert run_export.returncode == 0, f"export cli assertion failed: {run_export.stderr}\n{run_export.stdout}"
     after = {p.name for p in struct_b.iterdir() if p.is_file()}
     diff = sorted(after - before)
@@ -868,7 +921,7 @@ def _selftest(ctx, logger) -> int:
     _, struct_qsp = _create_selftest_tree(struct_qsp_root)
     before_qsp = {p.name for p in struct_qsp.iterdir() if p.is_file()}
     export_qsp_cmd = ["python", "main.py", "--no-gui", "--root", str(struct_qsp), "--export", "--output-type", "Qsp"]
-    run_export_qsp = subprocess.run(export_qsp_cmd, cwd=str(ctx.paths.program_dir), check=False, capture_output=True, text=True)
+    run_export_qsp = _run_selftest_subprocess(ctx, export_qsp_cmd, case_label="export-qsp")
     assert run_export_qsp.returncode == 0, f"Qsp export cli assertion failed: {run_export_qsp.stderr}\n{run_export_qsp.stdout}"
     after_qsp = {p.name for p in struct_qsp.iterdir() if p.is_file()}
     diff_qsp = sorted(after_qsp - before_qsp)
@@ -936,7 +989,7 @@ def _selftest(ctx, logger) -> int:
             return f"xlsx preview failed: {exc}"
     def _run_case(case_id: str, purpose: str, cmd: list[str]):
         before = set(ctx.paths.output_dir.glob("run_*.txt"))
-        run = subprocess.run(cmd, cwd=str(ctx.paths.program_dir), capture_output=True, text=True)
+        run = _run_selftest_subprocess(ctx, cmd, case_label=case_id)
         after = set(ctx.paths.output_dir.glob("run_*.txt"))
         new_files = sorted(after - before)
         status = "PASS" if run.returncode == 0 else "FAIL"

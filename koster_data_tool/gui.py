@@ -592,6 +592,14 @@ class App:
         self._refresh_error_states()
         return "break"
 
+
+    def _format_error_messages(self, msgs) -> str:
+        if isinstance(msgs, str):
+            return msgs
+        if isinstance(msgs, (list, tuple)):
+            return "；".join(str(m) for m in msgs)
+        return str(msgs)
+
     def _refresh_error_states(self):
         if self.param_table is None:
             return
@@ -618,7 +626,7 @@ class App:
             col_map = {"m_pos": "m_pos", "m_neg": "m_neg", "p_active": "p_active", "k": "k", "n_cv": "n_cv", "n_gcd": "n_gcd", "v_start": "v_start", "v_end": "v_end"}
             for key, msgs in row_errors.items():
                 if key in col_map:
-                    self.param_table.set_invalid((row_idx, col_map[key]), "；".join(msgs))
+                    self.param_table.set_invalid((row_idx, col_map[key]), self._format_error_messages(msgs))
         self.param_table.redraw()
 
     def _validate_all_rows(self):

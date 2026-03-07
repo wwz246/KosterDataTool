@@ -34,7 +34,7 @@ class RunContext:
 
 def make_run_id(now: Optional[datetime] = None) -> str:
     dt = now or datetime.now()
-    return dt.strftime("%Y%m%d_%H%M%S")
+    return dt.strftime("%Y%m%d_%H%M%S_%f")
 
 
 def _ensure_dir(p: Path) -> None:

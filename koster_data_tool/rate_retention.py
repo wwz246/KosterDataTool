@@ -108,10 +108,18 @@ def build_rate_and_retention_for_battery(
                 dq_rep = rep.delta_q_dis
                 dq_eff_rep = rep.delta_q_eff_dis
                 dv_eff_rep = rep.delta_v_eff_dis
-            else:
+            elif result.main_order == "Discharge→Charge":
                 dq_rep = rep.delta_q_chg
                 dq_eff_rep = rep.delta_q_eff_chg
                 dv_eff_rep = rep.delta_v_eff_chg
+            else:
+                dq_rep = math.nan
+                dq_eff_rep = math.nan
+                dv_eff_rep = math.nan
+                msg = f"W5305 主顺序不可判定，Rate/Retention 指标置空 file={fp} cycle={result.n_gcd}"
+                logger.warning(msg, code="W5305", file_path=fp, cycle=result.n_gcd)
+                _append_run_report(run_report_path, msg)
+                warnings.append(msg)
             csp_eff = _calc_csp(dq_eff_rep, dv_eff_rep, m_active_g, float(k_factor))
             if math.isnan(csp_eff):
                 msg = f"W5202 Csp(eff) 无法计算 file={fp} cycle={result.n_gcd}"
